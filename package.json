@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-notify",
   "version": "1.1.0",
-  "description": "DSH 桌面通知 — 任务完成 / 等待输入 / 审批被拒 / 后台任务结束时通过 desktop-notifier 发送 Windows Toast（仅 DSH 页面不可见时）。Installed as a real web-profile plugin: auto-loads on every dsh web start, no approval needed.",
+  "description": "DSH 桌面通知 — 任务完成 / 等待输入 / 审批被拒 / 子代理与后台任务结束时通过常驻 Python 助手（desktop-notifier）发送 Windows Toast；仅 DSH 网页聚焦时静默，非聚焦推送。Installed as a real web-profile plugin: auto-loads on every dsh web start, no approval needed.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
