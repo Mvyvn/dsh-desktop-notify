@@ -18,8 +18,11 @@ fi
 
 mkdir -p "$TARGET"
 cp -R "$REPO_ROOT/lib"              "$TARGET/"
+cp -R "$REPO_ROOT/assets"           "$TARGET/"
 cp    "$REPO_ROOT/cordis.patch.yml" "$TARGET/"
 cp    "$REPO_ROOT/package.json"     "$TARGET/"
+mkdir -p "$TARGET/scripts"
+cp    "$REPO_ROOT/scripts/register-aumid.py" "$TARGET/scripts/" 2>/dev/null || true
 echo "[dsh-desktop-notify] plugin files installed to $TARGET"
 
 if [ ! -f "$PROFILE_PKG" ]; then

@@ -18,8 +18,11 @@ if (-not (Test-Path $profileDir)) {
 # 1. copy plugin files
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Copy-Item (Join-Path $repoRoot 'lib')              $target -Recurse -Force
+Copy-Item (Join-Path $repoRoot 'assets')           $target -Recurse -Force
 Copy-Item (Join-Path $repoRoot 'cordis.patch.yml') $target -Force
 Copy-Item (Join-Path $repoRoot 'package.json')     $target -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $target 'scripts') | Out-Null
+Copy-Item (Join-Path $repoRoot 'scripts\register-aumid.py') (Join-Path $target 'scripts') -Force
 Write-Host "[dsh-desktop-notify] plugin files installed to $target" -ForegroundColor Green
 
 # 2. register as a bundle in the profile package.json (idempotent)
@@ -50,6 +53,22 @@ if (-not (Test-Path $profilePkg)) {
     } else {
         Write-Host "[dsh-desktop-notify] already registered in profile package.json (no change)" -ForegroundColor Cyan
     }
+}
+
+Write-Host ""
+# 3. register AUMID shortcut + registry icon (toast 顶部"程序应用图标"来源)
+#    只写 DSH 自己的快捷方式与注册表键，不触碰任何 Python 相关项。
+$pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+if ($pythonExe) {
+    $lnkPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\DSH 桌面通知.lnk'
+    $ico = Join-Path $target 'assets\dsh.ico'
+    & $pythonExe (Join-Path $target 'scripts\register-aumid.py') `
+        --target $pythonExe --icon $ico --lnk $lnkPath --app-id 'DSH' --display-name 'DSH'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[dsh-desktop-notify] AUMID registration failed (exit $LASTEXITCODE) — 可稍后手动运行 scripts/register-aumid.py" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[dsh-desktop-notify] python not found on PATH — 跳过 AUMID 注册（需要 python 才能发通知）" -ForegroundColor Yellow
 }
 
 Write-Host ""
