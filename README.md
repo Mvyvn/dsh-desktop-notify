@@ -79,6 +79,7 @@ dsh-desktop-notify/
 - **`never` 政策下的审批通知**：`approval/request` waterfall 在 `never` 政策下不会派发，因此插件改从会话日志的 `approval/asked`/`approval/decided` 审计对获取被拒记录。想收到这类通知请保持审批政策为 `never`。
 - **通知图标**：Toast 的 appLogoOverride 只接受 PNG/JPG/GIF（不支持 SVG），`desktop-notifier` 默认图标是 python.png——插件随包携带 `assets/dsh.png`（由 `scripts/make-icon.py` 从 DSH favicon 栅格化，透明底白鱼）；Toast 顶部/通知中心的程序应用图标由 `scripts/register-aumid.py` 注册 AUMID `DSH` 快捷方式与注册表（只写 DSH 自己的键，不触碰任何 Python 相关项）。
 - 依赖桌面通知后端（Windows Toast 由 `desktop-notifier` + WinRT 驱动）；Windows **专注助手/勿扰模式**可能吞掉 Toast。
+- **调试日志开关**：默认关闭，终端不输出任何 `[dsh-desktop-notify]` 状态信息。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire 等状态日志。
 - 主要在 Windows 开发测试；macOS/Linux 路径与通知后端未实测，欢迎反馈。
 
 ## 许可证

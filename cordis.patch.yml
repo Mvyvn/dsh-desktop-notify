@@ -4,6 +4,14 @@
 # The row makes the package a loader entry, which also lets
 # dsh-client-modules scan its dsh.client declaration and serve the browser
 # bundle from exports["./client"]. No approval: it is part of the profile.
+#
+# config.debug：调试日志开关（默认 false=关闭）。开启后终端会输出
+# [dsh-desktop-notify] 状态日志（notify 决策/聚焦上报/fire 等），便于排查。
+# 在 profile 层覆盖该行即可开启，例如：
+#   - id: desktop-notify
+#     config: { debug: true }
 - insert:
     - id: desktop-notify
       name: 'dsh-desktop-notify'
+      config:
+        debug: false
