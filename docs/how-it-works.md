@@ -70,7 +70,8 @@
   - WinRT 字符串参数一律 HSTRING（`WindowsCreateString`），不是 LPCWSTR；
   - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`，advapi32 直调），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast，且失败后 1 分钟会再试一次（成功则永久缓存）；
   - 无 Python、无子进程、无冷启动：单条发送是纯进程内几次 vtable 调用；`RoActivateInstance` / `RoGetActivationFactory` / `QI` 拿到的接口引用都在用完后 `Release`（notifier 进程内缓存复用），避免常驻宿主每发一条就漏一个对象。
-- **Linux（`lib/toast-linux.js`，纯 JS D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS`，缺省 `/run/user/<uid>/bus`；支持 `unix:path=` 与 `unix:abstract=` 两种地址）——
+- **Linux（`lib/toast-linux.js`，纯 JS D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS`，缺省 `/run/user/<uid>/bus`）——
+  - 地址解析支持 `unix:path=`（首选）；`unix:abstract=` 也认，但 Node/libuv 用 C 字符串长度定位 Unix 套接字，抽象命名空间地址实测会直接 `EINVAL`，此时日志会明确提示改用文件路径形式；
   - 认证：写入 NUL 字节后发 `AUTH EXTERNAL <uid 十进制字符串的十六进制>`，收到 `OK <guid>` 再发 `BEGIN`（被拒时退回 `AUTH ANONYMOUS` 一次）；
   - 发送：自实现的编组器产出小端 `method_call`（header fields：PATH/INTERFACE/MEMBER/DESTINATION/SIGNATURE，body 签名 `susssasa{sv}i`）后写 socket；`hints` 里**始终带一条 urgency**（0/1/2），刻意避开"空 `a{sv}` 的元素对齐在实现间有分歧"这个坑；
   - 连接常驻复用、断开即重连；未连上时最多缓存 32 条待发；连接/握手有 15 秒超时（半开的总线不会让通知永远堆在待发里），失败后 30 秒内不再重连且同一原因只打一条错误日志；错误（`ERROR` 类型的回复）走 `console.error`，不打断宿主；
