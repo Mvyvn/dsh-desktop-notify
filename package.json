@@ -15,7 +15,8 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/winrt.js"
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/winrt.js && node --check lib/gate.js",
+    "test": "node --test \"tests/*.test.mjs\""
   },
   "dsh": {
     "bundle": {
