@@ -9,11 +9,17 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      # 两个版本线都跑：测试入口曾因 Node 20 与 22+ 对 `node --test` 参数处理不同，
+      # 本地（24）全绿却只在 CI（20）挂掉。
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
       - name: Syntax check (host + client + senders)
         run: npm run check
       - name: Unit tests (focus gate / public API / D-Bus marshalling)
