@@ -114,30 +114,32 @@ if (Test-LocalKoffi $probe) {
 }
 
 # 3. register as a bundle in the profile package.json (idempotent)
+#    用 node 读写 JSON：PowerShell 5.1 的 ConvertTo-Json 会把非 ASCII 转义成 \uXXXX、
+#    并整体重排格式；交给 node 可保持 UTF-8 原样（与 install.sh 行为一致）。
 if (-not (Test-Path $profilePkg)) {
     Write-Host "[dsh-desktop-notify] profile package.json missing at $profilePkg — cannot register bundle" -ForegroundColor Yellow
     Write-Host "Add 'dsh-desktop-notify' to dsh.profile.bundles manually, then restart." -ForegroundColor Yellow
 } else {
-    $changed = $false
-    $json = Get-Content $profilePkg -Raw | ConvertFrom-Json
-
-    if (-not ($json.dependencies.PSObject.Properties.Name -contains 'dsh-desktop-notify')) {
-        $json.dependencies | Add-Member -NotePropertyName 'dsh-desktop-notify' -NotePropertyValue '1.0.0'
-        $changed = $true
-        Write-Host "[dsh-desktop-notify] added to profile dependencies" -ForegroundColor Green
-    }
-
-    $bundles = @($json.dsh.profile.bundles)
-    if ($bundles -notcontains 'dsh-desktop-notify') {
-        $json.dsh.profile.bundles = $bundles + 'dsh-desktop-notify'
-        $changed = $true
-        Write-Host "[dsh-desktop-notify] added to profile bundles" -ForegroundColor Green
-    }
-
-    if ($changed) {
-        $out = $json | ConvertTo-Json -Depth 10
-        [System.IO.File]::WriteAllText($profilePkg, $out, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host "[dsh-desktop-notify] updated $profilePkg" -ForegroundColor Green
+    # 登记真实版本号（原先硬编码 1.0.0，与包版本漂移）
+    $repoVersion = '0.0.0'
+    try { $repoVersion = (Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json).version } catch { }
+    $code = @'
+const fs = require('fs')
+const [pkg, name, version] = process.argv.slice(1)
+const p = JSON.parse(fs.readFileSync(pkg, 'utf8'))
+let changed = false
+if (!p.dependencies) { p.dependencies = {}; changed = true }
+if (!p.dependencies[name]) { p.dependencies[name] = version; changed = true }
+if (!p.dsh) { p.dsh = {}; changed = true }
+if (!p.dsh.profile) { p.dsh.profile = {}; changed = true }
+if (!Array.isArray(p.dsh.profile.bundles)) { p.dsh.profile.bundles = []; changed = true }
+if (!p.dsh.profile.bundles.includes(name)) { p.dsh.profile.bundles.push(name); changed = true }
+if (changed) fs.writeFileSync(pkg, JSON.stringify(p, null, 2) + '\n')
+process.exit(changed ? 0 : 1)
+'@
+    & node -e $code $profilePkg 'dsh-desktop-notify' $repoVersion
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[dsh-desktop-notify] registered in profile package.json as $repoVersion" -ForegroundColor Green
     } else {
         Write-Host "[dsh-desktop-notify] already registered in profile package.json (no change)" -ForegroundColor Cyan
     }

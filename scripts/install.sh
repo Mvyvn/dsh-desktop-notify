@@ -48,18 +48,24 @@ fi
 if [ ! -f "$PROFILE_PKG" ]; then
   echo "[dsh-desktop-notify] profile package.json missing at $PROFILE_PKG — add 'dsh-desktop-notify' to dsh.profile.bundles manually" >&2
 else
+  # 登记真实版本号（原先硬编码 1.0.0，与包版本漂移）
+  REPO_VERSION="$(node -e "process.stdout.write(require('$REPO_ROOT/package.json').version)")"
   node -e "
     const fs = require('fs');
-    const path = process.argv[1];
+    const [path, name, version] = process.argv.slice(1);
     const p = JSON.parse(fs.readFileSync(path, 'utf8'));
     let changed = false;
-    if (!p.dependencies) p.dependencies = {};
-    if (!p.dependencies['dsh-desktop-notify']) { p.dependencies['dsh-desktop-notify'] = '1.0.0'; changed = true; }
-    if (!Array.isArray(p.dsh.profile.bundles)) p.dsh.profile.bundles = [];
-    if (!p.dsh.profile.bundles.includes('dsh-desktop-notify')) { p.dsh.profile.bundles.push('dsh-desktop-notify'); changed = true; }
+    if (!p.dependencies) { p.dependencies = {}; changed = true; }
+    if (!p.dependencies[name]) { p.dependencies[name] = version; changed = true; }
+    if (!p.dsh) { p.dsh = {}; changed = true; }
+    if (!p.dsh.profile) { p.dsh.profile = {}; changed = true; }
+    if (!Array.isArray(p.dsh.profile.bundles)) { p.dsh.profile.bundles = []; changed = true; }
+    if (!p.dsh.profile.bundles.includes(name)) { p.dsh.profile.bundles.push(name); changed = true; }
     if (changed) fs.writeFileSync(path, JSON.stringify(p, null, 2) + '\n');
     process.exit(changed ? 0 : 1);
-  " "$PROFILE_PKG" && echo "[dsh-desktop-notify] updated $PROFILE_PKG" || echo "[dsh-desktop-notify] already registered in profile package.json (no change)"
+  " "$PROFILE_PKG" 'dsh-desktop-notify' "$REPO_VERSION" \
+    && echo "[dsh-desktop-notify] registered in profile package.json as $REPO_VERSION" \
+    || echo "[dsh-desktop-notify] already registered in profile package.json (no change)"
 fi
 
 echo ""
