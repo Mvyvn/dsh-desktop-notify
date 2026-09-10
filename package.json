@@ -28,6 +28,9 @@
       "platform": "web"
     }
   },
+  "dependencies": {
+    "koffi": "^3.1.6"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": "*"
   },
