@@ -5,11 +5,11 @@
 #   assets/dsh.png  — 256x256 RGBA：透明底 + 白色鱼形（Toast appLogoOverride 用）
 #   assets/dsh.ico  — 256x256 ICO（PNG 压缩，透明底白鱼；AUMID 应用图标用）
 #
-# 依赖：pip install svgpathtools pillow（已就绪，本脚本不改动全局环境）
+# 依赖：pip install svgpathtools pillow（仅开发期换图用；插件安装与运行都不需要 Python）
 # 用法：python scripts/make-icon.py
 #
 # 背景：Windows Toast 的 appLogoOverride 只支持 PNG/JPG/GIF，不支持 SVG；
-# desktop-notifier 默认使用其自带的 python.png —— 所以必须预栅格化一张 PNG。
+# 故必须预栅格化一张 PNG 随包携带（Linux 侧的 app_icon 也直接用它）。
 # 实现：svgpathtools 解析路径 → 按不连续点切分子路径 → 贝塞尔展平 →
 #       PIL 多边形填充（外轮廓白、内孔镂空）→ 4x 超采样 + LANCZOS 抗锯齿。
 

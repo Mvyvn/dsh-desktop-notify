@@ -25,10 +25,11 @@
 │  ctx.on('jobs.onJobDone')    ──┘        ▼                            │
 │                             队列（200ms 间隔，失败单次重排队）          │
 │                                     ▼                               │
-│                   常驻 Python 助手（stdin 逐行 JSON）                 │
+│                   发送层：winrt.js（Windows / koffi 直调 WinRT）      │
+│                           toast-linux.js（Linux / D-Bus，规划中）     │
 └──────────────────────────────────────┬───────────────────────────────┘
                                        ▼
-                       desktop-notifier（Windows Toast）
+                      系统通知（Windows Toast / Linux 桌面通知）
 ```
 
 ## 聚焦门控
@@ -56,11 +57,15 @@
 
 `dsh-user-approval` 的 `decide()` 在 `never` 政策下直接返回 `'rejected'`，**不会派发** `approval/request` waterfall。但每次询问/裁决都会在会话日志落审计事件 `approval/asked` + `approval/decided`。因此插件监听 `session/event`（post-commit 追加流）读取这对审计事件——`never` 政策下每条被拒操作都会产生一条完整记录。
 
-## 常驻 Python 助手
+## 发送层（进程内原生直连）
 
-- dsh 启动时随插件拉起一个 Python 进程（`python -X utf8 -c PY_HELPER <icon>`），导入 desktop-notifier/WinRT 一次，此后逐行从 stdin 读取 JSON 载荷发送 Toast——单条毫秒级、无冷启动；
-- 单事件循环 + 守护线程：同步读 stdin 保证顺序，发送经 `run_coroutine_threadsafe` 提交到常驻 loop，`fut.result(timeout=10)` 串行等待；
-- 崩溃自动重建（写失败/进程退出 → dead 标记 → 下条重新拉起）；插件卸载时 `terminate()` 树级清理；队列 200ms 间隔防轰炸，发送失败单次重排队。
+- **Windows（`lib/winrt.js`，koffi）**：`ToastNotificationManager` 工厂 → 槽 6 `GetDefault()` → `ToastNotificationManagerForUser` → 槽 7 `CreateToastNotifierWithId('DSH')`（notifier 进程内缓存复用）→ `XmlDocument` 激活 → QI `IXmlDocumentIO` → 槽 6 `LoadXml(HSTRING)` → `ToastNotification` 工厂 → 槽 6 `CreateInstance` → `IToastNotifier` 槽 6 `Show`。
+  - 不用旧 `Statics.CreateToastNotifier(appId)`：本机（Windows 11 26100）返回 `0x80070490`，必须走 `ForUser` 变体；
+  - WinRT 字符串参数一律 HSTRING（`WindowsCreateString`），不是 LPCWSTR；
+  - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`，advapi32 直调），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast；
+  - 无 Python、无子进程、无冷启动：单条发送是纯进程内几次 vtable 调用。
+- **Linux（`lib/toast-linux.js`，D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`），SASL EXTERNAL 握手后调 `org.freedesktop.Notifications.Notify`，同样不起 `notify-send` 子进程。（适配进行中，见 HANDOFF。）
+- 队列 200ms 间隔防轰炸；发送抛错时单次重排队。
 
 ## 消息缓存
 
