@@ -29,14 +29,42 @@ Write-Host "[dsh-desktop-notify] plugin files installed to $target" -ForegroundC
 
 # 2. ensure the koffi runtime dependency is resolvable from the plugin
 #    （profile 用 link: 依赖时 npm 不会自动装它的依赖，故这里显式确保）
-function Test-Koffi([string]$dir) {
-    return (Test-Path (Join-Path $dir 'package.json')) -and (Test-Path (Join-Path $dir 'build'))
+#
+#    判据必须是真的能 require 到：koffi 3.x 由 npm 安装时**不会**创建 build/ 目录
+#    （原生二进制来自独立的 @koromix/koffi-<platform>-<arch> 包），用目录形状判断
+#    会把装好的 koffi 误报为缺失。这里直接以插件目录为解析起点真加载一次，
+#    与 lib/winrt.js 的 import 'koffi' 走同一条解析链。
+function Get-KoffiProbe([string]$dir) {
+    $code = "try{const p=require.resolve('koffi');const k=require('koffi');console.log('OK '+k.version+' '+p)}catch(e){console.log('FAIL '+(e.code||e.message))}"
+    $out = ''
+    Push-Location $dir
+    try {
+        $out = (& node -e $code 2>&1 | Out-String).Trim()
+    } catch {
+        $out = 'FAIL ' + $_.Exception.Message
+    } finally {
+        Pop-Location
+    }
+    if ($out -like 'OK *') {
+        $parts = $out.Split(' ', 3)
+        return [pscustomobject]@{ ok = $true; version = $parts[1]; path = $parts[2]; raw = $out }
+    }
+    return [pscustomobject]@{ ok = $false; version = ''; path = ''; raw = $out }
 }
-if (Test-Koffi $koffiDir) {
-    Write-Host "[dsh-desktop-notify] koffi already present in profile" -ForegroundColor Cyan
+
+function Test-LocalKoffi($probe) {
+    return ($probe.ok -and ($probe.path -like "$profileDir*"))
+}
+
+$probe = Get-KoffiProbe $target
+$npmLog = ''
+if (Test-LocalKoffi $probe) {
+    Write-Host "[dsh-desktop-notify] koffi ready ($($probe.version))" -ForegroundColor Cyan
 } else {
-    $repoKoffi = Join-Path $repoRoot 'node_modules\koffi'
-    $installed = $false
+    if ($probe.ok) {
+        Write-Host "[dsh-desktop-notify] koffi 当前解析到 profile 之外：$($probe.version) $($probe.path)" -ForegroundColor Yellow
+        Write-Host "  （依赖 DSH 自身的依赖布局，DSH 换目录/清理依赖后插件会整个加载失败，故尝试装一份到 profile）" -ForegroundColor DarkGray
+    }
     # 优先用 npm.cmd（避免 PowerShell 执行策略拦截 npm.ps1）
     $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
     if (-not $npm) { $npm = (Get-Command npm -ErrorAction SilentlyContinue).Source }
@@ -45,26 +73,43 @@ if (Test-Koffi $koffiDir) {
         Push-Location $profileDir
         try {
             # --no-save/--no-package-lock：不重写 profile 的 package.json 与锁文件
-            & $npm install 'koffi@^3.1.6' --legacy-peer-deps --no-save --no-package-lock 2>&1 | Out-Null
-            $installed = Test-Koffi $koffiDir
+            $npmLog = (& $npm install 'koffi@^3.1.6' --legacy-peer-deps --no-save --no-package-lock 2>&1 | Out-String)
         } catch {
-            $installed = $false
+            $npmLog = $_ | Out-String
         } finally {
             Pop-Location
         }
+        $probe = Get-KoffiProbe $target
     }
-    if (-not $installed -and (Test-Koffi $repoKoffi)) {
-        Write-Host "[dsh-desktop-notify] npm path unavailable — copying koffi from the repo" -ForegroundColor Cyan
-        New-Item -ItemType Directory -Force -Path (Join-Path $profileDir 'node_modules') | Out-Null
-        Copy-Item $repoKoffi $koffiDir -Recurse -Force
-        $installed = Test-Koffi $koffiDir
+    if (-not (Test-LocalKoffi $probe)) {
+        # 离线回退：从本仓库 node_modules 拷贝。
+        # ⚠️ 必须连 @koromix/koffi-<platform>-<arch> 一起拷——koffi 的原生模块是独立的
+        # optionalDependency，只拷 koffi 会得到 "Cannot find the native Koffi module"。
+        $repoKoffi = Join-Path $repoRoot 'node_modules\koffi'
+        $repoKoromix = Join-Path $repoRoot 'node_modules\@koromix'
+        if (Test-Path $repoKoffi) {
+            Write-Host "[dsh-desktop-notify] npm 不可用或未成功 — 从仓库拷贝 koffi" -ForegroundColor Cyan
+            New-Item -ItemType Directory -Force -Path (Join-Path $profileDir 'node_modules') | Out-Null
+            Copy-Item $repoKoffi $koffiDir -Recurse -Force
+            if (Test-Path $repoKoromix) {
+                Copy-Item $repoKoromix (Join-Path $profileDir 'node_modules\@koromix') -Recurse -Force
+            } else {
+                Write-Host "[dsh-desktop-notify] 警告：仓库里没有 node_modules\@koromix，拷贝出的 koffi 无法加载原生模块" -ForegroundColor Yellow
+            }
+            $probe = Get-KoffiProbe $target
+        }
     }
-    if ($installed) {
-        Write-Host "[dsh-desktop-notify] koffi ready" -ForegroundColor Green
+    if ($probe.ok) {
+        $where = if (Test-LocalKoffi $probe) { 'profile 内' } else { 'profile 之外' }
+        Write-Host "[dsh-desktop-notify] koffi ready ($($probe.version), $where)" -ForegroundColor Green
     } else {
         Write-Host "[dsh-desktop-notify] koffi MISSING — 请在 $profileDir 下执行：" -ForegroundColor Yellow
         Write-Host "    npm install koffi --legacy-peer-deps" -ForegroundColor Yellow
-        Write-Host "  否则运行时 import koffi 会失败（通知发不出去）。" -ForegroundColor Yellow
+        Write-Host "  否则运行时 import koffi 会失败，插件整个不会加载（不只是发不出通知）。" -ForegroundColor Yellow
+        if ($npmLog) {
+            Write-Host "  npm 输出（末 8 行）:" -ForegroundColor DarkGray
+            ($npmLog -split "`n" | Select-Object -Last 8) | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        }
     }
 }
 
