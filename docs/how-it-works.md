@@ -73,6 +73,17 @@
 - **Linux（`lib/toast-linux.js`，D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`），SASL EXTERNAL 握手后调 `org.freedesktop.Notifications.Notify`，同样不起 `notify-send` 子进程。（适配进行中，见 HANDOFF。）
 - 队列 200ms 间隔防轰炸；发送抛错时单次重排队。
 
+## 对外推送 API（供其它插件）
+
+插件在 `apply` 里用 `ctx.provide('desktopNotify', api)` 暴露两个方法（实现在 `lib/api.js`）：
+
+| 方法 | 门控 | 用途 |
+| --- | --- | --- |
+| `push(item)` | 走聚焦门控（按会话） | 与内置 6 类通知同待遇：你看的那个会话静默，其它照常弹 |
+| `pushAlways(item)` | 绕过门控 | 无论聚焦与否都弹（紧急提醒） |
+
+载荷 `{ title, message?, urgency?, sessionId? }`；标题为空返回 `false` 且不推送；`sessionId` 决定会话级门控归属（不传则 `push` 也始终推送）。入队后与内置通知共用同一队列（200ms 间隔）。
+
 ## 消息缓存
 
 - `lastTextBySession`：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知**消费即释放**（推送或被门控静默丢弃都释放），下次回复自动重建——内存只留活跃条目；

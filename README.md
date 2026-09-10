@@ -59,6 +59,34 @@ node scripts/winrt-probe.mjs   # Windows：注册 AUMID + 发一条真实 Toast
 
 前缀的"工作区"按会话动态解析（多工作区并行时各显示自己的工作区名），"会话名"取 `sessionTitle` 服务。门控只比对会话，不影响文案。
 
+## 给其它插件调用（对外 API）
+
+本插件把自己注册成 Cordis 服务 `desktopNotify`，**你自己的插件可以直接调用它推送通知**，两种模式：
+
+```js
+// 在你的插件里（宿主半区 apply）
+export function apply(ctx) {
+  const notify = ctx.get('desktopNotify')   // 可选服务：本插件未加载时为 undefined
+  if (!notify) return
+
+  // 1) 走聚焦门控：只有"你正在看的那个会话"会被静默
+  notify.push({
+    title: '构建完成',
+    message: '工作区/会话:全部通过',
+    urgency: 'normal',      // 'low' | 'normal' | 'critical'，缺省 normal
+    sessionId: agent.session, // 可选：传了就按会话门控；不传则始终推送
+  })
+
+  // 2) 绕过聚焦门控：无论页面是否聚焦、正在看哪个会话，都弹
+  notify.pushAlways({ title: '磁盘告急', message: '剩余 1GB', urgency: 'critical' })
+}
+```
+
+- 返回 `true` 表示已受理入队；**标题为空返回 `false` 且不推送**（避免空通知）。
+- `title` 最长 160 字符、`message` 最长 400 字符，超出截断；队列仍按 200ms 间隔逐条发送。
+- `sessionId` 可传会话对象、会话 id 或它们的数组（子代理场景可同时传主会话与子会话）。
+- 想全局取用可写 `inject: ['desktopNotify']`（硬依赖，本插件缺失时你的插件不会加载）；否则用 `ctx.get` 按可选服务处理。
+
 ## 项目结构
 
 ```

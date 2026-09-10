@@ -59,6 +59,34 @@ node scripts/winrt-probe.mjs   # Windows: registers the AUMID key and raises a r
 
 The workspace prefix is resolved per session (parallel sessions in different workspaces each show their own), and the session name comes from the `sessionTitle` service. Gating only compares sessions; it never changes the wording.
 
+## Calling it from your own plugin (public API)
+
+The plugin registers a Cordis service named `desktopNotify`, so **your own plugin can push notifications through it** in two modes:
+
+```js
+// in your plugin (host half, apply)
+export function apply(ctx) {
+  const notify = ctx.get('desktopNotify')   // optional service: undefined when this plugin is absent
+  if (!notify) return
+
+  // 1) through the focus gate: only the session you are looking at is silenced
+  notify.push({
+    title: 'Build finished',
+    message: 'workspace/session: all green',
+    urgency: 'normal',        // 'low' | 'normal' | 'critical', defaults to normal
+    sessionId: agent.session, // optional: enables per-session gating; omit to always push
+  })
+
+  // 2) bypassing the gate: pops no matter what is focused or selected
+  notify.pushAlways({ title: 'Disk almost full', message: '1 GB left', urgency: 'critical' })
+}
+```
+
+- `true` means the item was accepted into the queue; **an empty title returns `false` and pushes nothing**.
+- `title` is capped at 160 chars and `message` at 400 (truncated); items still go out 200 ms apart.
+- `sessionId` accepts a session object, an id, or an array of them (for subagents pass both the main and the child session).
+- For a hard dependency write `inject: ['desktopNotify']` (your plugin then waits for this one); otherwise treat it as optional via `ctx.get`.
+
 ## Project layout
 
 ```

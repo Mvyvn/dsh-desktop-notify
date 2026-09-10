@@ -5,6 +5,7 @@
 ```
 lib/index.js   宿主半区（ESM，export name/inject/apply(ctx, config)）
 lib/gate.js    按"页面 × 会话"的聚焦门控（纯逻辑，tests/gate.test.mjs 覆盖）
+lib/api.js     对外推送 API（desktopNotify 服务的载荷归一与双模式路由，tests/api.test.mjs 覆盖）
 lib/winrt.js   Windows 发送层（koffi 直调 WinRT + AUMID 注册表写入）
 lib/client.js  浏览器半区（window.__ModuleLoader__.load 包裹，标准 cordis client 插件）
 assets/        通知图标 dsh.png / dsh.ico（DSH Logo，透明底；由 scripts/make-icon.py 栅格化）
@@ -12,6 +13,14 @@ scripts/       install.ps1 / install.sh（安装）、winrt-probe.mjs（Windows 
 tests/         node --test 单测
 cordis.patch.yml   bundle patch：把宿主半区作为一行插入 web profile composition（含 config.debug 默认值）
 ```
+
+## 对外提供的服务
+
+| 服务 | 内容 | 说明 |
+| --- | --- | --- |
+| `desktopNotify` | `push(item)` / `pushAlways(item)` | `ctx.provide` 注册；`push` 走聚焦门控（按会话），`pushAlways` 绕过门控。载荷 `{ title, message?, urgency?, sessionId? }`，逻辑在 `lib/api.js` |
+
+其它插件 `ctx.get('desktopNotify')` 取用（可选服务），或 `inject: ['desktopNotify']` 声明硬依赖。
 
 ## 常驻加载（无需审批）
 
