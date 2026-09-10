@@ -46,6 +46,11 @@ Verify: switch to another window, let the agent run a small task, and a toast sh
 node scripts/winrt-probe.mjs   # Windows: registers the AUMID key and raises a real toast
 ```
 
+```bash
+# Linux: fires one notification (run inside a desktop session; plain SSH has no bus)
+node --input-type=module -e "import('./lib/toast-linux.js').then(m => m.sendToast({ title: 'DSH notify test', message: 'direct D-Bus works' }))"
+```
+
 ## Notification catalog
 
 | Notification | Hook | Session used for silencing | Body |
@@ -91,10 +96,12 @@ export function apply(ctx) {
 
 ```
 dsh-desktop-notify/
-├── lib/          # host index.js (gating / queue) + gate.js (per-session focus gate) + winrt.js (Windows sender) + browser client.js (reporting)
+├── lib/          # host index.js (gating / queue / platform dispatch) + gate.js (per-session gate) + api.js (public push API)
+│                 # senders: winrt.js (Windows / koffi → WinRT), toast-linux.js (Linux / D-Bus)
+│                 # client.js (browser focus + session reporting)
 ├── assets/       # notification icons dsh.png / dsh.ico (DSH fish logo, transparent)
 ├── scripts/      # install.ps1 / install.sh, WinRT smoke test winrt-probe.mjs, icon generator make-icon.py
-├── tests/        # node --test unit tests (gating logic, …)
+├── tests/        # node --test unit tests (focus gate / public API / D-Bus marshalling)
 ├── docs/         # architecture, how-it-works, getting-started
 ├── screenshots/
 ├── cordis.patch.yml
@@ -104,13 +111,16 @@ dsh-desktop-notify/
 ## How it works & limitations
 
 - **Focus gating (per session, event-driven, zero polling)**: the browser half (`lib/client.js`) reports, over the official Connection RPC channel `/dnotify`, whether the page is focused **and which session it currently has selected** (read from the harness client `sessions` service, `list.current`; a session switch re-reports immediately) — focused means `visibilityState === 'visible' && document.hasFocus()`, driven by native `focus`/`blur`/`visibilitychange`/`pagehide` events (page close is reliably reported via `keepalive`); user activity on the focused page (keyboard/mouse/scroll, throttled to 10 s) keeps it "fresh". The host aggregates per page × session (`lib/gate.js`): a notification is silenced **only when a focused page has exactly that session selected** — while you are reading session A, a finish in session B still pops. Notifications without a session (e.g. a job whose owner was already cleaned up) are never silenced. A focused-but-idle page (2 minutes without activity) counts as unfocused, and page entries that stopped reporting are pruned (10 minutes, crash fallback).
-- **Delivery layer (native, in-process)**: on Windows `lib/winrt.js` drives WinRT through koffi (`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`) with no Python helper and no subprocess; before the first toast it idempotently writes `HKCU\SOFTWARE\Classes\AppUserModelId\DSH` (`DisplayName` + `IconUri`) so the notification center shows the icon. The queue spaces sends by 200 ms and re-queues a failed send once.
+- **Delivery layer (native, in-process)**: `lib/index.js` loads the sender for the current platform (koffi is never imported off Windows).
+  - **Windows (`lib/winrt.js`)**: drives WinRT through koffi (`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`) with no Python helper and no subprocess; before the first toast it idempotently writes `HKCU\SOFTWARE\Classes\AppUserModelId\DSH` (`DisplayName` + `IconUri`) so the notification center shows the icon.
+  - **Linux (`lib/toast-linux.js`)**: speaks the D-Bus wire protocol in pure JS (`$DBUS_SESSION_BUS_ADDRESS` or `/run/user/<uid>/bus`, SASL EXTERNAL handshake → `org.freedesktop.Notifications.Notify`) with no `notify-send` subprocess; the connection is kept and reused, reconnects after a drop, and carries title/body/icon/urgency as method arguments.
+  - Both platforms share one send queue: 200 ms spacing, a failed send is re-queued once.
 - **Message cache**: only the latest assistant-reply summary (≤220 chars) is cached per session, released as soon as the task-done notification consumes it; ask-timestamps (15 s suppression) are pruned when stale; re-initialized on restart.
 - **Approval notices under `never`**: the `approval/request` waterfall is not dispatched under the `never` policy, so the plugin reads the `approval/asked`/`approval/decided` audit pair from the session log instead. Keep the approval policy `never` to receive these notices.
 - **Notification icon**: the toast `appLogoOverride` only accepts PNG/JPG/GIF (SVG is not supported), so the plugin ships `assets/dsh.png` (rasterized from the DSH favicon by `scripts/make-icon.py`; transparent background, white fish — that script is a development-time asset tool, not needed to install or run the plugin); the app identity icon atop toasts / in the notification center comes from the AUMID `DSH` registry key `IconUri` (DSH-only keys).
 - **Debug log switch**: off by default — the terminal prints no `[dsh-desktop-notify]` status lines. For troubleshooting, override the `desktop-notify` row in the profile's `cordis.patch.yml` (`config: { debug: true }`) and restart; the terminal then logs notify decisions / focus reports / fire / onJobDone.
 - Depends on the platform notification backend: Windows Toast via WinRT, Linux via the desktop session's D-Bus notification service (KDE/GNOME). Windows **Focus Assist** and Linux do-not-disturb switches may swallow notifications.
-- Windows is tested in practice; Linux goes through D-Bus (no desktop session, e.g. plain SSH, means no notifications); a macOS backend is not implemented yet.
+- **Platforms**: Windows is tested in practice (Windows 11); Linux speaks D-Bus directly (Kubuntu/KDE, Ubuntu/GNOME and other desktop sessions — a plain SSH session with no desktop bus gets no notifications) and its marshalling is unit-tested; a macOS backend is not implemented yet (the plugin loads and logs a single "no backend" notice).
 
 ## License
 

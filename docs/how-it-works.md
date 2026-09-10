@@ -70,7 +70,11 @@
   - WinRT 字符串参数一律 HSTRING（`WindowsCreateString`），不是 LPCWSTR；
   - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`，advapi32 直调），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast；
   - 无 Python、无子进程、无冷启动：单条发送是纯进程内几次 vtable 调用。
-- **Linux（`lib/toast-linux.js`，D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`），SASL EXTERNAL 握手后调 `org.freedesktop.Notifications.Notify`，同样不起 `notify-send` 子进程。（适配进行中，见 HANDOFF。）
+- **Linux（`lib/toast-linux.js`，纯 JS D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS`，缺省 `/run/user/<uid>/bus`；支持 `unix:path=` 与 `unix:abstract=` 两种地址）——
+  - 认证：写入 NUL 字节后发 `AUTH EXTERNAL <uid 十进制字符串的十六进制>`，收到 `OK <guid>` 再发 `BEGIN`（被拒时退回 `AUTH ANONYMOUS` 一次）；
+  - 发送：自实现的编组器产出小端 `method_call`（header fields：PATH/INTERFACE/MEMBER/DESTINATION/SIGNATURE，body 签名 `susssasa{sv}i`）后写 socket；`hints` 里**始终带一条 urgency**（0/1/2），刻意避开"空 `a{sv}` 的元素对齐在实现间有分歧"这个坑；
+  - 连接常驻复用、断开即重连；未连上时最多缓存 32 条待发；错误（`ERROR` 类型的回复）走 `console.error`，不打断宿主；
+  - 不起 `notify-send` 子进程；编组逻辑平台无关，由 `tests/dbus.test.mjs` 用测试侧解码器做往返校验。
 - 队列 200ms 间隔防轰炸；发送抛错时单次重排队。
 
 ## 对外推送 API（供其它插件）

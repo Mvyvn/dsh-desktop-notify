@@ -14,7 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Syntax check (host + client)
-        run: node --check lib/index.js && node --check lib/client.js
+      - name: Syntax check (host + client + senders)
+        run: npm run check
+      - name: Unit tests (focus gate / public API / D-Bus marshalling)
+        run: npm test
       - name: Validate package.json
         run: node -e "const p=require('./package.json'); if(p.name!=='dsh-desktop-notify') throw new Error('bad name'); if(!p.dsh||!p.dsh.bundle||!p.dsh.client) throw new Error('missing dsh manifest')"
