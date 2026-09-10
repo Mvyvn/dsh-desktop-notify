@@ -87,8 +87,8 @@ export function apply(ctx) {
 }
 ```
 
-- `true` means the item was accepted into the queue; **an empty title returns `false` and pushes nothing**.
-- `title` is capped at 160 chars and `message` at 400 (truncated); items still go out 200 ms apart.
+- `true` means the item was **accepted by the API** (whether it actually pops still depends on the focus gate — a silenced item also returns `true`); **an empty title returns `false` and pushes nothing**.
+- `title` is capped at 160 chars and `message` at 400 (truncated without splitting surrogate pairs such as emoji); items still go out 200 ms apart.
 - `sessionId` accepts a session object, an id, or an array of them (for subagents pass both the main and the child session).
 - For a hard dependency write `inject: ['desktopNotify']` (your plugin then waits for this one); otherwise treat it as optional via `ctx.get`.
 
@@ -115,10 +115,10 @@ dsh-desktop-notify/
   - **Windows (`lib/winrt.js`)**: drives WinRT through koffi (`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`) with no Python helper and no subprocess; before the first toast it idempotently writes `HKCU\SOFTWARE\Classes\AppUserModelId\DSH` (`DisplayName` + `IconUri`) so the notification center shows the icon.
   - **Linux (`lib/toast-linux.js`)**: speaks the D-Bus wire protocol in pure JS (`$DBUS_SESSION_BUS_ADDRESS` or `/run/user/<uid>/bus`, SASL EXTERNAL handshake → `org.freedesktop.Notifications.Notify`) with no `notify-send` subprocess; the connection is kept and reused, reconnects after a drop, and carries title/body/icon/urgency as method arguments.
   - Both platforms share one send queue: 200 ms spacing, a failed send is re-queued once.
-- **Message cache**: only the latest assistant-reply summary (≤220 chars) is cached per session, released as soon as the task-done notification consumes it; ask-timestamps (15 s suppression) are pruned when stale; re-initialized on restart.
+- **Message cache**: only the latest assistant-reply summary (≤220 chars) is cached per session, released as soon as the task-done notification consumes it; ask-timestamps (15 s suppression) are pruned when stale; the approval pairing table keeps at most 64 orphan entries (asked without a decided); re-initialized on restart.
 - **Approval notices under `never`**: the `approval/request` waterfall is not dispatched under the `never` policy, so the plugin reads the `approval/asked`/`approval/decided` audit pair from the session log instead. Keep the approval policy `never` to receive these notices.
 - **Notification icon**: the toast `appLogoOverride` only accepts PNG/JPG/GIF (SVG is not supported), so the plugin ships `assets/dsh.png` (rasterized from the DSH favicon by `scripts/make-icon.py`; transparent background, white fish — that script is a development-time asset tool, not needed to install or run the plugin); the app identity icon atop toasts / in the notification center comes from the AUMID `DSH` registry key `IconUri` (DSH-only keys).
-- **Debug log switch**: off by default — the terminal prints no `[dsh-desktop-notify]` status lines. For troubleshooting, override the `desktop-notify` row in the profile's `cordis.patch.yml` (`config: { debug: true }`) and restart; the terminal then logs notify decisions / focus reports / fire / onJobDone.
+- **Debug log switch**: off by default — the terminal prints no `[dsh-desktop-notify]` **status** lines. For troubleshooting, override the `desktop-notify` row in the profile's `cordis.patch.yml` (`config: { debug: true }`) and restart; the terminal then logs notify decisions / focus reports / fire / onJobDone. **Error** logs are not gated by this switch: send failures, D-Bus errors, hook exceptions and the no-backend notice still go to stderr.
 - Depends on the platform notification backend: Windows Toast via WinRT, Linux via the desktop session's D-Bus notification service (KDE/GNOME). Windows **Focus Assist** and Linux do-not-disturb switches may swallow notifications.
 - **Platforms**: Windows is tested in practice (Windows 11); Linux speaks D-Bus directly (Kubuntu/KDE, Ubuntu/GNOME and other desktop sessions — a plain SSH session with no desktop bus gets no notifications) and its marshalling is unit-tested; a macOS backend is not implemented yet (the plugin loads and logs a single "no backend" notice).
 

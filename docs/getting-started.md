@@ -49,11 +49,13 @@ bash scripts/install.sh
 | 现象 | 排查 |
 | --- | --- |
 | 什么通知都不弹 | 先跑上面的冒烟测试确认发送层本身可用；再看插件是否加载（终端 `config.debug: true` 后有 `[dsh-desktop-notify] plugin ready`）；确认系统通知设置里「DSH」未被专注助手/勿扰拦截 |
-| 提示 `Cannot find package 'koffi'`（仅 Windows） | profile 里缺运行时依赖：在 `$DSH_HOME/profiles/web` 下执行 `npm install koffi --legacy-peer-deps`，或重跑 `scripts/install.ps1`（会从本仓库 `node_modules` 拷贝一份） |
-| Linux 没有通知 | 必须是有桌面会话的环境（`echo $DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/$(id -u)/bus` 存在）；纯 SSH/容器里没有会话总线，日志会出现 `D-Bus 连接错误` |
+| 提示 `Cannot find package 'koffi'`（仅 Windows） | profile 里缺运行时依赖，**整个插件都不会加载**（不是只少发送层）：在 `$DSH_HOME/profiles/web` 下执行 `npm install koffi --legacy-peer-deps`，或重跑 `scripts/install.ps1` |
+| 不确定 koffi 到底从哪加载 | 在 profile 目录里执行 `node -e "console.log(require.resolve('koffi'))"`：路径应落在 `profiles/web/node_modules/` 下；若指向 DSH 自己的目录（例如 `deepseek-harness/...`），说明只是借用上游依赖，DSH 换布局就会失效 |
+| Linux 没有通知 | 必须是有桌面会话的环境（`echo $DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/$(id -u)/bus` 存在）；纯 SSH/容器里没有会话总线，日志会出现 `D-Bus 连接失败`（同一原因只打一条，失败后 30 秒内不重连） |
 | 离开聚焦会话也不弹 | 在 profile 层开启调试开关（`config: { debug: true }`）后重启，看终端 `[dsh-desktop-notify]` 日志：确认 `onJobDone`/`notify` 是否触发、`session=` 与 `silenced=` 的值、`fire` 是否执行 |
+| 后台任务结束不弹 | 看调试日志里 `jobs service:` 那行：正常是 `available` 或 `pending — 用 ctx.inject 等它就绪`（服务晚挂载也会自动补挂）；若一直是旧版的 `MISSING` 说明装的是旧代码 |
 | 聚焦判定异常（该静默没静默/该推没推） | 确认页面加载的是最新 `client.js`（Ctrl+F5 强制刷新）；聚焦判定 = `visibilityState === 'visible' && document.hasFocus()` |
-| 通知中心图标是空白/默认图标 | AUMID 键未写成功：`Get-ItemProperty 'HKCU:\SOFTWARE\Classes\AppUserModelId\DSH'` 应能看到 `DisplayName`/`IconUri`；缺失时重跑安装脚本（插件首次发送也会补写一次） |
+| 通知中心图标是空白/默认图标 | AUMID 键未写成功：`Get-ItemProperty 'HKCU:\SOFTWARE\Classes\AppUserModelId\DSH'` 应能看到 `DisplayName`/`IconUri`；缺失时重跑安装脚本（插件首次发送也会补写一次，失败后 1 分钟会再试） |
 | 只有部分类别弹 | 逐类核对触发场景；「审批被自动拒绝」仅当审批政策为 `never` 且确有操作被拒时触发 |
 
 ## 调试开关

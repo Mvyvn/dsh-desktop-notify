@@ -38,14 +38,14 @@ cordis.patch.yml   bundle patch：把宿主半区作为一行插入 web profile 
 | 服务 | 用途 | 获取方式 |
 | --- | --- | --- |
 | `connection` | Connection RPC 通道 `/dnotify`（页面聚焦与选中会话上报） | `inject`（硬依赖） |
-| `timer` | 去抖 / 队列间隔 | `inject`（硬依赖） |
-| `sandboxPolicy` / `fs` | 解析工作目录（派生工作区名） | `ctx.get`（可选） |
-| `agents` / `sessions` / `sessionTitle` | 根 agent 过滤 / 会话与主会话解析 / 会话标题 | `ctx.get`（可选） |
-| `jobs` | 后台任务完成通知 | `ctx.get`（可选） |
+| `timer` | 去抖 / 队列间隔（`ctx.timeout`） | `inject`（硬依赖） |
+| `fs` | 解析工作目录（派生工作区名） | `ctx.get`（可选） |
+| `agents` / `sessions` / `sessionTitle` | 根 agent 过滤 / 会话与主会话解析 / 会话标题 | `ctx.get`（可选，每次用时惰性取） |
+| `jobs` | 后台任务完成通知 | 先 `ctx.get` 探测；缺了用 `ctx.inject(['jobs'], …)` 延迟注册——**不能**只在 apply 里 get 一次，晚挂载的 jobs 会让钩子永不注册 |
 
 浏览器半区读客户端 `sessions` 服务（`list.getSnapshot().current` = 当前选中会话，`list.subscribe` 观察切换）；取不到就上报 `null`，宿主对"归属不明"的通知照常推送。
 
-发送层不需要任何宿主服务：`lib/index.js` 按 `process.platform` 动态 import（win32 之外不会加载 koffi）。Windows 侧 `koffi` 是包依赖，需在 profile 的 `node_modules` 中可解析；Linux 侧只用 `node:net` 连 Unix 套接字，零额外依赖。
+发送层不需要任何宿主服务：`lib/index.js` 按 `process.platform` 动态 import（win32 之外不会加载 koffi）。Windows 侧 `koffi` 是包依赖：`winrt.js` 顶层就 `koffi.load('combase.dll')`，所以 **koffi 解析不到时整个插件都不会加载**（不是"只是发不出通知"）。Linux 侧只用 `node:net` 连 Unix 套接字，零额外依赖。
 
 ## 平台分发
 
@@ -59,7 +59,7 @@ cordis.patch.yml   bundle patch：把宿主半区作为一行插入 web profile 
 
 - 全部监听器、定时器、effect 都挂在插件 Fiber 上（`ctx.on` / `ctx.effect` / `ctx.timeout` 返回的 disposer），插件停止或更新时自动清理（卸载时顺带关掉 Linux 侧的 D-Bus 连接）；
 - **聚焦门控状态（`lib/gate.js`）**：`pages` = pageId → `{at, sessionId}`（该页面最近聚焦上报时间 + 当前选中会话）；静默判定按会话而非全局，10 分钟无上报的条目自动移除（异常关闭兜底）；
-- **缓存**：`lastTextBySession`（回复摘要，任务完成消费即释放）、`askAtBySession`（提问时刻，15s 抑制，惰性清理）、`asksById`（审批配对，decided 即删）——全部只缓存标量叶子字段，不持有 live 对象；
+- **缓存**：`lastTextBySession`（回复摘要，任务完成消费即释放）、`askAtBySession`（提问时刻，15s 抑制，惰性清理）、`asksById`（审批配对，decided 即删；孤儿条目——会话被中断、没等到裁决——最多留 64 条，超限先丢最旧的）——全部只缓存标量叶子字段，不持有 live 对象；
 - 无持久化状态：重启即从零开始，事件流自然重建上下文（Linux 侧 D-Bus 连接也是进程内复用，未连上时最多缓存 32 条待发）。
 
 ## 故障排查

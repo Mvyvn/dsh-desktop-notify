@@ -87,8 +87,8 @@ export function apply(ctx) {
 }
 ```
 
-- 返回 `true` 表示已受理入队；**标题为空返回 `false` 且不推送**（避免空通知）。
-- `title` 最长 160 字符、`message` 最长 400 字符，超出截断；队列仍按 200ms 间隔逐条发送。
+- 返回 `true` 表示**已被 API 受理**（是否真的弹还取决于聚焦门控：被静默时同样返回 `true`，不区分）；**标题为空返回 `false` 且不推送**（避免空通知）。
+- `title` 最长 160 字符、`message` 最长 400 字符，超出截断（不会切断 emoji 这类代理对）；队列仍按 200ms 间隔逐条发送。
 - `sessionId` 可传会话对象、会话 id 或它们的数组（子代理场景可同时传主会话与子会话）。
 - 想全局取用可写 `inject: ['desktopNotify']`（硬依赖，本插件缺失时你的插件不会加载）；否则用 `ctx.get` 按可选服务处理。
 
@@ -115,12 +115,12 @@ dsh-desktop-notify/
   - **Windows（`lib/winrt.js`）**：koffi 直调 WinRT（`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`），不拉起任何 Python/子进程；首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`）供通知中心显示图标。
   - **Linux（`lib/toast-linux.js`）**：纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL 握手 → 调 `org.freedesktop.Notifications.Notify`），不调用 `notify-send`；连接常驻复用、断开自动重连，标题/正文/图标/urgency 都随方法参数发出。
   - 两平台共用同一条发送队列：200ms 间隔防轰炸，发送失败单次重排队。
-- **消息缓存**：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知消费后即释放；提问时刻（15 秒抑制）条目过期自动清理；重启自动初始化。
+- **消息缓存**：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知消费后即释放；提问时刻（15 秒抑制）条目过期自动清理；审批配对表在没等到裁决时会留孤儿条目，最多保留 64 条；重启自动初始化。
 - **`never` 政策下的审批通知**：`approval/request` waterfall 在 `never` 政策下不会派发，因此插件改从会话日志的 `approval/asked`/`approval/decided` 审计对获取被拒记录。想收到这类通知请保持审批政策为 `never`。
 - **通知图标**：Toast 的 appLogoOverride 只接受 PNG/JPG/GIF（不支持 SVG），插件随包携带 `assets/dsh.png`（由 `scripts/make-icon.py` 从 DSH favicon 栅格化，透明底白鱼；该脚本只是开发期换图工具，装插件时不需要跑，也不需要 Python）；Toast 顶部/通知中心的程序应用图标来自 AUMID `DSH` 的注册表键 `IconUri`（只写 DSH 自己的键）。
 - 依赖系统桌面通知后端：Windows Toast 由 WinRT 提供，Linux 由桌面会话的 D-Bus 通知服务（KDE/GNOME 等）提供；Windows **专注助手/勿扰模式**、Linux 的勿扰开关都可能吞掉通知。
 - **平台**：Windows 已实测（Windows 11）；Linux 走 D-Bus（Kubuntu/KDE、Ubuntu/GNOME 等桌面会话；无桌面会话的纯 SSH 环境不会弹通知），D-Bus 编组有单测覆盖；macOS 后端暂未实现（会加载但只记录一条"无后端"提示）。
-- **调试日志开关**：默认关闭，终端不输出任何 `[dsh-desktop-notify]` 状态信息。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire 等状态日志。
+- **调试日志开关**：默认关闭，终端不输出 `[dsh-desktop-notify]` **状态**日志。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire 等状态日志。**错误**日志不受开关限制：发送失败、D-Bus 连接错误、钩子异常、无通知后端提示都照常打印。
 
 ## 许可证
 

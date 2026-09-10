@@ -29,7 +29,7 @@
 │                             队列（200ms 间隔，失败单次重排队）          │
 │                                     ▼                               │
 │                   发送层：winrt.js（Windows / koffi 直调 WinRT）      │
-│                           toast-linux.js（Linux / D-Bus，规划中）     │
+│                           toast-linux.js（Linux / D-Bus 直连会话总线）│
 └──────────────────────────────────────┬───────────────────────────────┘
                                        ▼
                       系统通知（Windows Toast / Linux 桌面通知）
@@ -68,12 +68,12 @@
 - **Windows（`lib/winrt.js`，koffi）**：`ToastNotificationManager` 工厂 → 槽 6 `GetDefault()` → `ToastNotificationManagerForUser` → 槽 7 `CreateToastNotifierWithId('DSH')`（notifier 进程内缓存复用）→ `XmlDocument` 激活 → QI `IXmlDocumentIO` → 槽 6 `LoadXml(HSTRING)` → `ToastNotification` 工厂 → 槽 6 `CreateInstance` → `IToastNotifier` 槽 6 `Show`。
   - 不用旧 `Statics.CreateToastNotifier(appId)`：本机（Windows 11 26100）返回 `0x80070490`，必须走 `ForUser` 变体；
   - WinRT 字符串参数一律 HSTRING（`WindowsCreateString`），不是 LPCWSTR；
-  - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`，advapi32 直调），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast；
-  - 无 Python、无子进程、无冷启动：单条发送是纯进程内几次 vtable 调用。
+  - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`，advapi32 直调），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast，且失败后 1 分钟会再试一次（成功则永久缓存）；
+  - 无 Python、无子进程、无冷启动：单条发送是纯进程内几次 vtable 调用；`RoActivateInstance` / `RoGetActivationFactory` / `QI` 拿到的接口引用都在用完后 `Release`（notifier 进程内缓存复用），避免常驻宿主每发一条就漏一个对象。
 - **Linux（`lib/toast-linux.js`，纯 JS D-Bus）**：直连会话总线（`$DBUS_SESSION_BUS_ADDRESS`，缺省 `/run/user/<uid>/bus`；支持 `unix:path=` 与 `unix:abstract=` 两种地址）——
   - 认证：写入 NUL 字节后发 `AUTH EXTERNAL <uid 十进制字符串的十六进制>`，收到 `OK <guid>` 再发 `BEGIN`（被拒时退回 `AUTH ANONYMOUS` 一次）；
   - 发送：自实现的编组器产出小端 `method_call`（header fields：PATH/INTERFACE/MEMBER/DESTINATION/SIGNATURE，body 签名 `susssasa{sv}i`）后写 socket；`hints` 里**始终带一条 urgency**（0/1/2），刻意避开"空 `a{sv}` 的元素对齐在实现间有分歧"这个坑；
-  - 连接常驻复用、断开即重连；未连上时最多缓存 32 条待发；错误（`ERROR` 类型的回复）走 `console.error`，不打断宿主；
+  - 连接常驻复用、断开即重连；未连上时最多缓存 32 条待发；连接/握手有 15 秒超时（半开的总线不会让通知永远堆在待发里），失败后 30 秒内不再重连且同一原因只打一条错误日志；错误（`ERROR` 类型的回复）走 `console.error`，不打断宿主；
   - 不起 `notify-send` 子进程；编组逻辑平台无关，由 `tests/dbus.test.mjs` 用测试侧解码器做往返校验。
 - 队列 200ms 间隔防轰炸；发送抛错时单次重排队。
 
@@ -86,21 +86,21 @@
 | `push(item)` | 走聚焦门控（按会话） | 与内置 6 类通知同待遇：你看的那个会话静默，其它照常弹 |
 | `pushAlways(item)` | 绕过门控 | 无论聚焦与否都弹（紧急提醒） |
 
-载荷 `{ title, message?, urgency?, sessionId? }`；标题为空返回 `false` 且不推送；`sessionId` 决定会话级门控归属（不传则 `push` 也始终推送）。入队后与内置通知共用同一队列（200ms 间隔）。
+载荷 `{ title, message?, urgency?, sessionId? }`；标题为空返回 `false` 且不推送，其余情况返回 `true` 表示**已被 API 受理**（是否真的弹仍取决于门控：被静默时返回值同样是 `true`，不区分）；`sessionId` 决定会话级门控归属（不传则 `push` 也始终推送）。入队后与内置通知共用同一队列（200ms 间隔）。
 
 ## 消息缓存
 
 - `lastTextBySession`：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知**消费即释放**（推送或被门控静默丢弃都释放），下次回复自动重建——内存只留活跃条目；
 - `askAtBySession`：提问时刻（15 秒内抑制任务完成通知），过期条目惰性清理；
-- `asksById`：审批配对，`decided` 后即删；重启后全部自动初始化。
+- `asksById`：审批配对，`decided` 后即删；孤儿条目（会话被中断、始终没等到裁决）最多保留 64 条，超限先丢最旧的；重启后全部自动初始化。
 
 ## 调试开关
 
-`config.debug`（默认 `false`）：关闭时终端不输出任何 `[dsh-desktop-notify]` 状态信息。排查时在 profile 层 `cordis.patch.yml` 覆盖 `desktop-notify` 行：
+`config.debug`（默认 `false`）：关闭时终端不输出 `[dsh-desktop-notify]` **状态**日志（notify 决策 / 聚焦上报 / fire / onJobDone 等）。排查时在 profile 层 `cordis.patch.yml` 覆盖 `desktop-notify` 行：
 
 ```yaml
 - id: desktop-notify
   config: { debug: true }
 ```
 
-开启后终端输出 notify 决策 / 聚焦上报 / fire / onJobDone 等状态日志。
+**错误**日志不受这个开关限制：发送失败、D-Bus 连接/认证错误、钩子异常、无通知后端提示都照常打印到 stderr。
