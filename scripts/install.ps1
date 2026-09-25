@@ -1,4 +1,4 @@
-# dsh-desktop-notify installer — Windows
+﻿# dsh-desktop-notify installer — Windows
 # Copies the plugin into the dsh web profile, ensures its koffi runtime dependency,
 # registers it as a bundle, writes the AUMID icon key (idempotent), then tells you
 # to fully restart dsh web.
@@ -19,15 +19,19 @@ if (-not (Test-Path $profileDir)) {
     exit 1
 }
 
-# 1. copy plugin files
+# 1b. copy plugin files（在依赖安装之后：npm 不会再把它们当 extraneous 清掉）
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Copy-Item (Join-Path $repoRoot 'lib')              $target -Recurse -Force
 Copy-Item (Join-Path $repoRoot 'assets')           $target -Recurse -Force
 Copy-Item (Join-Path $repoRoot 'cordis.patch.yml') $target -Force
 Copy-Item (Join-Path $repoRoot 'package.json')     $target -Force
-Write-Host "[dsh-desktop-notify] plugin files installed to $target" -ForegroundColor Green
+$installedVersion = '0.0.0'
+try { $installedVersion = (Get-Content (Join-Path $target 'package.json') -Raw | ConvertFrom-Json).version } catch { }
+Write-Host "[dsh-desktop-notify] plugin files installed to $target (v$installedVersion)" -ForegroundColor Green
 
-# 2. ensure the koffi runtime dependency is resolvable from the plugin
+# 1. ensure the koffi runtime dependency is resolvable from the profile **先于拷贝插件**。
+#    ⚠️ 顺序很重要：npm install 会把 profile 里"不在 dependencies 中"的目录当 extraneous
+#    清掉——先拷插件再装依赖，插件目录会被 npm 直接删掉（实测如此）。
 #    （profile 用 link: 依赖时 npm 不会自动装它的依赖，故这里显式确保）
 #
 #    判据必须是真的能 require 到：koffi 3.x 由 npm 安装时**不会**创建 build/ 目录
@@ -37,13 +41,17 @@ Write-Host "[dsh-desktop-notify] plugin files installed to $target" -ForegroundC
 function Get-KoffiProbe([string]$dir) {
     $code = "try{const p=require.resolve('koffi');const k=require('koffi');console.log('OK '+k.version+' '+p)}catch(e){console.log('FAIL '+(e.code||e.message))}"
     $out = ''
-    Push-Location $dir
+    # Push-Location 也必须在 try 里：目录不存在时它抛的是终止性错误，
+    # 在 $ErrorActionPreference='Stop' 下会直接终止整个脚本（曾经就是这样中断安装的）
     try {
-        $out = (& node -e $code 2>&1 | Out-String).Trim()
+        Push-Location $dir
+        try {
+            $out = (& node -e $code 2>&1 | Out-String).Trim()
+        } finally {
+            Pop-Location
+        }
     } catch {
         $out = 'FAIL ' + $_.Exception.Message
-    } finally {
-        Pop-Location
     }
     if ($out -like 'OK *') {
         $parts = $out.Split(' ', 3)
@@ -120,16 +128,18 @@ if (-not (Test-Path $profilePkg)) {
     Write-Host "[dsh-desktop-notify] profile package.json missing at $profilePkg — cannot register bundle" -ForegroundColor Yellow
     Write-Host "Add 'dsh-desktop-notify' to dsh.profile.bundles manually, then restart." -ForegroundColor Yellow
 } else {
-    # 登记真实版本号（原先硬编码 1.0.0，与包版本漂移）
+    # ⚠️ 只登记 dsh.profile.bundles，**不**写 dependencies。
+    #    本插件是"手动拷进 profile"的本地包；npm 上有个同名的**另一个**插件
+    #    （与本仓库无关）：写进 dependencies 会让任何一次 `npm install` 去 registry
+    #    拉那一个、把本地这份覆盖掉。不写则 npm 只会在它自己跑 install 时把本目录
+    #    当 extraneous 清掉（可重跑本脚本恢复）——后者是可见、可恢复的失败。
     $repoVersion = '0.0.0'
     try { $repoVersion = (Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json).version } catch { }
     $code = @'
 const fs = require('fs')
-const [pkg, name, version] = process.argv.slice(1)
+const [pkg, name] = process.argv.slice(1)
 const p = JSON.parse(fs.readFileSync(pkg, 'utf8'))
 let changed = false
-if (!p.dependencies) { p.dependencies = {}; changed = true }
-if (!p.dependencies[name]) { p.dependencies[name] = version; changed = true }
 if (!p.dsh) { p.dsh = {}; changed = true }
 if (!p.dsh.profile) { p.dsh.profile = {}; changed = true }
 if (!Array.isArray(p.dsh.profile.bundles)) { p.dsh.profile.bundles = []; changed = true }
@@ -137,18 +147,32 @@ if (!p.dsh.profile.bundles.includes(name)) { p.dsh.profile.bundles.push(name); c
 if (changed) fs.writeFileSync(pkg, JSON.stringify(p, null, 2) + '\n')
 process.exit(changed ? 0 : 1)
 '@
-    & node -e $code $profilePkg 'dsh-desktop-notify' $repoVersion
+    & node -e $code $profilePkg 'dsh-desktop-notify'
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "[dsh-desktop-notify] registered in profile package.json as $repoVersion" -ForegroundColor Green
+        Write-Host "[dsh-desktop-notify] registered in profile dsh.profile.bundles (v$repoVersion)" -ForegroundColor Green
     } else {
-        Write-Host "[dsh-desktop-notify] already registered in profile package.json (no change)" -ForegroundColor Cyan
+        Write-Host "[dsh-desktop-notify] already registered in profile dsh.profile.bundles (no change)" -ForegroundColor Cyan
     }
+    Write-Host "  注意：该 profile 里不要再跑 npm install —— 它会把这份手动安装的插件当 extraneous 清掉（重跑本脚本即可恢复）" -ForegroundColor DarkGray
 }
 
 # 4. register the AUMID icon key (toast 顶部"程序应用图标"来源)
 #    只写 DSH 自己的键：HKCU\SOFTWARE\Classes\AppUserModelId\DSH
-#    插件首次发送时也会幂等补写一次，这里先写好可让图标立刻生效。
-$ico = Join-Path $target 'assets\dsh.ico'
+#    通知背景跟随系统深浅色，图标不会被反色——所以这里按当前系统主题挑一套
+#    （dsh-dark=白鱼 / dsh-light=黑鱼）；插件运行时也会随主题切换自动改写。
+$themeIco = 'dsh.ico'
+try {
+    $personalize = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    $light = (Get-ItemProperty -Path $personalize -Name 'SystemUsesLightTheme' -ErrorAction SilentlyContinue).SystemUsesLightTheme
+    if ($null -eq $light) {
+        $light = (Get-ItemProperty -Path $personalize -Name 'AppsUseLightTheme' -ErrorAction SilentlyContinue).AppsUseLightTheme
+    }
+    if ($light -eq 1) { $themeIco = 'dsh-light.ico' } else { $themeIco = 'dsh-dark.ico' }
+} catch {
+    # 读不到就退回旧路径的 dsh.ico（= 深色主题的白鱼）
+}
+$ico = Join-Path $target "assets\$themeIco"
+if (-not (Test-Path $ico)) { $ico = Join-Path $target 'assets\dsh.ico' }
 if (Test-Path $ico) {
     try {
         $aumidKey = 'HKCU:\SOFTWARE\Classes\AppUserModelId\DSH'
@@ -156,12 +180,12 @@ if (Test-Path $ico) {
         New-ItemProperty -Path $aumidKey -Name 'DisplayName' -Value 'DSH' -PropertyType String -Force | Out-Null
         New-ItemProperty -Path $aumidKey -Name 'IconUri' `
             -Value ('file:///' + $ico.Replace('\', '/')) -PropertyType String -Force | Out-Null
-        Write-Host "[dsh-desktop-notify] AUMID icon registered (DSH -> $ico)" -ForegroundColor Green
+        Write-Host "[dsh-desktop-notify] AUMID icon registered ($themeIco -> $ico)" -ForegroundColor Green
     } catch {
         Write-Host "[dsh-desktop-notify] AUMID 注册失败（只影响通知中心图标）：$_" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[dsh-desktop-notify] assets\dsh.ico not found — 跳过 AUMID 图标注册" -ForegroundColor Yellow
+    Write-Host "[dsh-desktop-notify] assets\*.ico not found — 跳过 AUMID 图标注册" -ForegroundColor Yellow
 }
 
 Write-Host ""
