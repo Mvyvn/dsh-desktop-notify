@@ -1,17 +1,20 @@
-# dsh-desktop-notify — 生成通知图标 assets/dsh.png / assets/dsh.ico
+# dsh-desktop-notify — 生成通知图标（深浅两套透明底鱼形）
 #
 # 输入：assets/dsh-logo.svg（DSH 官方 favicon，深色模式为白色鱼形）
-# 输出：
-#   assets/dsh.png  — 256x256 RGBA：透明底 + 白色鱼形（Toast appLogoOverride 用）
-#   assets/dsh.ico  — 256x256 ICO（PNG 压缩，透明底白鱼；AUMID 应用图标用）
+# 输出（均为 256x256 RGBA，透明底）：
+#   assets/dsh-dark.png  / dsh-dark.ico   — 白色鱼形，深色主题用（Toast/Linux 通知背景是深色）
+#   assets/dsh-light.png / dsh-light.ico  — 黑色鱼形，浅色主题用（背景是白色，白鱼会看不见）
+#   assets/dsh.png       / dsh.ico        — 兼容旧路径：与 dsh-dark.* 同像素（历史默认=白鱼）
 #
 # 依赖：pip install svgpathtools pillow（仅开发期换图用；插件安装与运行都不需要 Python）
 # 用法：python scripts/make-icon.py
 #
 # 背景：Windows Toast 的 appLogoOverride 只支持 PNG/JPG/GIF，不支持 SVG；
 # 故必须预栅格化一张 PNG 随包携带（Linux 侧的 app_icon 也直接用它）。
+#       Toast 与桌面通知的背景色跟随系统主题，图标本身不会被反色——所以必须
+#       深浅两套，由 lib/theme.js 在发送时按当前主题挑选。
 # 实现：svgpathtools 解析路径 → 按不连续点切分子路径 → 贝塞尔展平 →
-#       PIL 多边形填充（外轮廓白、内孔镂空）→ 4x 超采样 + LANCZOS 抗锯齿。
+#       PIL 多边形填充（外轮廓上色、内孔镂空）→ 4x 超采样 + LANCZOS 抗锯齿。
 
 import re
 import sys
@@ -22,8 +25,12 @@ from svgpathtools import parse_path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "assets" / "dsh-logo.svg"
-OUT_PNG = ROOT / "assets" / "dsh.png"
-OUT_ICO = ROOT / "assets" / "dsh.ico"
+# (输出文件名, 鱼形 RGB)——alpha 通道完全一致，只有前景色不同
+VARIANTS = [
+    ("dsh-dark", (255, 255, 255)),   # 深色主题：白鱼
+    ("dsh-light", (0, 0, 0)),        # 浅色主题：黑鱼
+]
+LEGACY = "dsh"                       # 旧路径，写一份与 dsh-dark 同像素的副本
 
 SIZE = 256            # 输出尺寸
 SS = 4                # 超采样倍数（抗锯齿；SS=4 → 1024x1024 绘制后降采样）
@@ -61,8 +68,8 @@ def signed_area(poly: list[tuple[float, float]]) -> float:
         s += poly[i][0] * poly[i + 1][1] - poly[i + 1][0] * poly[i][1]
     return s / 2.0
 
-def render_fish(d: str) -> Image.Image:
-    """返回 256x256 RGBA：透明底 + 白色鱼形。"""
+def render_fish(d: str, rgb: tuple[int, int, int]) -> Image.Image:
+    """返回 256x256 RGBA：透明底 + 指定颜色的鱼形。"""
     path = parse_path(d)
     polys = collect_subpaths(path)
 
@@ -87,7 +94,7 @@ def render_fish(d: str) -> Image.Image:
 
     # 超采样降采样 → 抗锯齿 alpha
     alpha = mask.resize((SIZE, SIZE), Image.LANCZOS)
-    out = Image.new("RGBA", (SIZE, SIZE), (255, 255, 255, 0))
+    out = Image.new("RGBA", (SIZE, SIZE), (*rgb, 0))
     out.putalpha(alpha)
     return out
 
@@ -98,10 +105,24 @@ def main() -> None:
         sys.exit(f"[make-icon] no path d= found in {SRC}")
     d = m.group(1)
 
-    img = render_fish(d)
-    img.save(OUT_PNG, format="PNG")
-    img.save(OUT_ICO, format="ICO", sizes=[(SIZE, SIZE)])
-    print(f"[make-icon] wrote {OUT_PNG} and {OUT_ICO} ({SIZE}x{SIZE}, transparent bg, white fish)")
+    written = []
+    for stem, rgb in VARIANTS:
+        img = render_fish(d, rgb)
+        png = ROOT / "assets" / f"{stem}.png"
+        ico = ROOT / "assets" / f"{stem}.ico"
+        img.save(png, format="PNG")
+        img.save(ico, format="ICO", sizes=[(SIZE, SIZE)])
+        written.append((png, ico))
+        print(f"[make-icon] wrote {png.name} and {ico.name} "
+              f"({SIZE}x{SIZE}, transparent bg, rgb={rgb})")
+
+    # 旧路径兼容副本：与深色（白鱼）版本逐像素一致，历史引用不会失效
+    dark_png, dark_ico = written[0]
+    legacy_png = ROOT / "assets" / f"{LEGACY}.png"
+    legacy_ico = ROOT / "assets" / f"{LEGACY}.ico"
+    legacy_png.write_bytes(dark_png.read_bytes())
+    legacy_ico.write_bytes(dark_ico.read_bytes())
+    print(f"[make-icon] wrote {legacy_png.name} and {legacy_ico.name} (copy of dsh-dark)")
 
 if __name__ == "__main__":
     main()
