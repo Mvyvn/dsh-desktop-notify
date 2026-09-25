@@ -2,14 +2,15 @@
 // 按 __ModuleLoader__ 协议取出工厂函数，用假 ctx 真跑一遍 apply()。
 //   npm test
 //
-// 之前这一半完全没有测试（两次独立审阅都点了这个缺口），而它承载着"会话级静默"
-// 的全部输入：选中会话读错 = 门控永远失效。这里锁住：
+// 锁住的行为：
 //   · 选中会话取自 sessions 快照的 byId[*].retainedBy.mainView（0.1.7 没有 current）
-//   · 上报走官方 ctx.get('connection').rpc.call；pagehide 走 raw fetch + keepalive
-//     且 URL 是文档相对形式（挂载在子路径下也正确）
-//   · DOM 事件显式包装（Event 不能被当成 focused=true）
-//   · 聚焦心跳只在聚焦时上报；卸载时监听器/订阅/心跳全部清理
-//   · sessions 服务晚就绪时，订阅后立刻补报一次
+//   · 聚焦/会话上报走自带的文档相对路由 dnotify/page-focus（纯 JSON POST；pagehide 带 keepalive）
+//   · DOM 事件显式包装（Event 不能被当成 focused=true）；心跳只在聚焦时上报
+//   · 点击通知：SSE(dnotify/events) 收到 navigate → POST dnotify/claim 认领 →
+//     只有拿到 target 的页面执行跳转（多页面只切一个由 host 侧先到先得保证）
+//   · 跳转目标：session:<id> → uiWorkspace.openSession；page:settings-plugins →
+//     合成快捷键打开设置并点「内置插件」，打不开就退回插件面板；page:plugins → 插件面板
+//   · 旧式 #dsh-notify= hash 仍能处理；卸载时监听器/订阅/心跳/SSE 全部清理
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -20,36 +21,38 @@ const CLIENT_SOURCE = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'client.js'), 'utf8',
 )
 
-/** 取一次 lib/client.js 注册的工厂函数（每次调用都重新求值，互不干扰）。 */
-function loadFactory() {
-  let registration = null
-  const sandbox = {
-    window: {
-      __ModuleLoader__: { load: (entry) => { registration = entry } },
-      sessionStorage: null,
-      location: { origin: 'http://127.0.0.1:3080' },
-      addEventListener() {},
-      removeEventListener() {},
-    },
-    document: {},
+/** 造一个假 DOM 元素（只需要 textContent / click()）。 */
+function element(label) {
+  return {
+    tagName: 'BUTTON',
+    textContent: label,
+    clicks: 0,
+    click() { this.clicks += 1 },
+    querySelectorAll: () => [],
   }
-  const fn = new Function('window', 'document', 'crypto', 'fetch', 'setInterval', 'clearInterval', 'URL', CLIENT_SOURCE)
-  fn(sandbox.window, sandbox.document, globalThis.crypto, globalThis.fetch, globalThis.setInterval, globalThis.clearInterval, globalThis.URL)
-  assert.ok(registration, 'client.js 必须通过 __ModuleLoader__.load 注册')
-  assert.equal(registration.id, 'dsh-desktop-notify')
-  return registration.factory
 }
 
-/** 搭一个假页面环境 + 假 ctx，返回可断言的一切。 */
-function harness(options = {}) {
-  const rpcCalls = []
+/** 建一个"页面"：假 window/document/ctx/定时器，装出 lib/client.js 的 apply。 */
+function createPage(options = {}) {
   const fetches = []
   const listeners = new Map()
-  const intervals = new Set()
+  const timers = new Map()
   const effects = []
   const injects = []
-  let focused = options.focused !== false
-  let visible = options.visible !== false
+  const sessionStorage = new Map()
+  const opened = []
+  const state = {
+    focused: options.focused !== false,
+    visible: options.visible !== false,
+    reloads: 0,
+    hash: options.hash || '',
+    settingsModal: options.settingsModal || null,
+    documentButtons: options.documentButtons || [],
+    eventSource: null,
+    keyboardEvents: [],
+  }
+  let timerId = 0
+  let now = 0
 
   const add = (target) => (type, fn) => {
     const key = target + ':' + type
@@ -64,22 +67,53 @@ function harness(options = {}) {
     for (const fn of [...(listeners.get(target + ':' + type) || [])]) fn({ type })
   }
 
-  const storage = new Map()
   const window = {
     __ModuleLoader__: { load: () => { throw new Error('这里不该再注册') } },
     sessionStorage: {
-      getItem: (k) => (storage.has(k) ? storage.get(k) : null),
-      setItem: (k, v) => storage.set(k, String(v)),
+      getItem: (k) => (sessionStorage.has(k) ? sessionStorage.get(k) : null),
+      setItem: (k, v) => sessionStorage.set(k, String(v)),
     },
-    location: { origin: 'http://127.0.0.1:3080' },
+    localStorage: {
+      getItem: (k) => (options.storage && options.storage.has(k) ? options.storage.get(k) : null),
+      setItem: (k, v) => { if (options.storage) options.storage.set(k, String(v)) },
+    },
+    location: {
+      origin: 'http://127.0.0.1:3080',
+      pathname: '/',
+      search: '',
+      get hash() { return state.hash },
+      reload() { state.reloads += 1 },
+    },
+    history: { replaceState: () => { state.hash = '' } },
     addEventListener: add('window'),
     removeEventListener: remove('window'),
+    dispatchEvent: (event) => { state.keyboardEvents.push(event) },
+    EventSource: class {
+      constructor(url) {
+        this.url = url
+        this.readyState = 0
+        this.handlers = {}
+        state.eventSource = this
+      }
+      addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn) }
+      emit(type) { for (const fn of this.handlers[type] || []) fn({ type }) }
+      close() { this.readyState = 2; state.eventSource = null }
+    },
+    KeyboardEvent: class {
+      constructor(type, init) { Object.assign(this, init, { type }) }
+    },
   }
   const document = {
     addEventListener: add('document'),
     removeEventListener: remove('document'),
-    get visibilityState() { return visible ? 'visible' : 'hidden' },
-    hasFocus: () => focused,
+    get visibilityState() { return state.visible ? 'visible' : 'hidden' },
+    hasFocus: () => state.focused,
+    querySelector: (selector) => {
+      if (selector === '[data-shortcut-modal="settings"]') return state.settingsModal
+      if (selector === 'button[aria-haspopup="menu"]') return state.menuTrigger || null
+      return null
+    },
+    querySelectorAll: () => state.documentButtons,
   }
 
   const sessionsState = { byId: options.byId || {} }
@@ -90,20 +124,18 @@ function harness(options = {}) {
       subscribe: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn) },
     },
   }
-  const connection = {
-    rpc: {
-      call: (channel, endpoint, payload) => {
-        rpcCalls.push({ channel, endpoint, payload })
-        return Promise.resolve({ ok: true, value: {} })
+  const services = { sessions: options.sessionsReady === false ? undefined : sessions }
+  if (options.uiWorkspace) {
+    services.uiWorkspace = {
+      openSession: (id) => {
+        if (options.openSessionThrows) throw new Error('unknown session')
+        opened.push(id)
       },
-    },
+    }
   }
+  if (options.pluginNavigation) services.pluginNavigation = { openBundle: (name) => { opened.push('panel:' + name) } }
+  if (options.layout) services.layout = { selectPanel: (id) => { opened.push('panel:' + id) } }
 
-  const factory = loadFactory()
-  const exports = factory(() => { throw new Error('client.js 不该 require 任何模块') })
-
-  const services = { connection, sessions: options.sessionsReady === false ? undefined : sessions }
-  // 记录真实的 disposer（ctx.effect 的返回值），卸载测试必须调它们而不是再跑一遍 setup
   const disposers = []
   const makeEffect = (fn) => {
     const d = fn()
@@ -122,175 +154,291 @@ function harness(options = {}) {
     },
   }
 
-  const runtime = {
-    rpcCalls, fetches, listeners, intervals, effects, injects, subscribers, disposers,
-    window, document, services, sessionsState, subscribers2: subscribers,
-    setFocused: (v) => { focused = v },
-    setVisible: (v) => { visible = v },
-    dispatch,
-    fireSubscribers: () => { for (const fn of [...subscribers]) fn() },
-    countListeners: () => [...listeners.values()].reduce((n, s) => n + s.size, 0),
-    setInterval: (fn, ms) => { const t = { fn, ms }; intervals.add(t); return t },
-    clearInterval: (t) => { intervals.delete(t) },
-    fetch: (url, init) => {
+  const setTimeoutFake = (fn, ms) => {
+    const id = ++timerId
+    timers.set(id, { fn, at: now + (Number(ms) || 0), interval: null })
+    return id
+  }
+  const setIntervalFake = (fn, ms) => {
+    const period = Number(ms) || 1
+    const id = ++timerId
+    timers.set(id, { fn, at: now + period, interval: period })
+    return id
+  }
+  const clearTimer = (id) => { timers.delete(id) }
+
+  let registration = null
+  window.__ModuleLoader__.load = (entry) => { registration = entry }
+  const load = new Function(
+    'window', 'document', 'fetch', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'navigator',
+    CLIENT_SOURCE,
+  )
+  load(
+    window, document,
+    (url, init) => {
       fetches.push({ url, init })
+      const body = init && init.body ? JSON.parse(init.body) : {}
+      const response = (options.responses || {})[url]
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({
-          type: 'server-response',
-          rpcId: JSON.parse(init.body).rpcId,
-          result: { ok: true, value: {} },
-        }),
+        status: 200,
+        json: () => Promise.resolve(response === undefined ? { ok: true, pages: 1 } : response(body)),
       })
     },
-    exports,
-    ctx,
-  }
-  return runtime
-}
-
-/** 用同一个 window 环境装载工厂（让 client.js 里的 window/document 闭包生效）。 */
-function loadInto(rt) {
-  let registration = null
-  rt.window.__ModuleLoader__ = { load: (entry) => { registration = entry } }
-  const fn = new Function('window', 'document', 'crypto', 'fetch', 'setInterval', 'clearInterval', 'URL', CLIENT_SOURCE)
-  fn(rt.window, rt.document, globalThis.crypto, rt.fetch, rt.setInterval, rt.clearInterval, globalThis.URL)
+    setTimeoutFake, clearTimer, setIntervalFake, clearTimer,
+    { platform: options.platform || 'Win32', userAgent: 'node' },
+  )
   const exports = registration.factory(() => { throw new Error('client.js 不该 require 任何模块') })
-  return exports
+
+  /** 推进假定时器（周期回调按间隔重排；上限防死循环）。 */
+  function advance(ms) {
+    const target = now + ms
+    for (let guard = 0; guard < 1000; guard += 1) {
+      let next = null
+      for (const [id, t] of timers) if (t.at <= target && (!next || t.at < next.t.at)) next = { id, t }
+      if (!next) break
+      now = next.t.at
+      if (next.t.interval === null) timers.delete(next.id)
+      else next.t.at = now + next.t.interval
+      next.t.fn()
+    }
+    now = target
+  }
+
+  return {
+    ctx, exports, fetches, listeners, injects, disposers, sessionsState, subscribers,
+    services, window, document, dispatch, state, opened,
+    get hash() { return state.hash },
+    setFocused: (v) => { state.focused = v },
+    setVisible: (v) => { state.visible = v },
+    setSettingsModal: (el) => { state.settingsModal = el },
+    get reloads() { return state.reloads },
+    fireSubscribers: () => { for (const fn of [...subscribers]) fn() },
+    countListeners: () => [...listeners.values()].reduce((n, s) => n + s.size, 0),
+    /** 最近一次上报的载荷（按 URL 过滤）。 */
+    lastFetch: (suffix) => fetches.filter((f) => f.url.endsWith(suffix)).pop(),
+    advance,
+    unsubscribe: () => { for (const off of disposers) off() },
+  }
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
+const deepLink = (target) => '#dsh-notify=' + encodeURIComponent(target)
 
 test('选中会话取自 retainedBy.mainView（客户端快照没有 current）', async () => {
-  const rt = harness({
+  const page = createPage({
     byId: {
       's-other': { id: 's-other', retainedBy: {} },
       's-main': { id: 's-main', retainedBy: { mainView: 1 } },
     },
   })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+  page.exports.apply(page.ctx)
   await tick()
-  assert.equal(rt.rpcCalls.length, 1)
-  assert.deepEqual(rt.rpcCalls[0], {
-    channel: '/dnotify',
-    endpoint: 'page-focus',
-    payload: { focused: true, pageId: rt.rpcCalls[0].payload.pageId, sessionId: 's-main' },
-  })
-  assert.match(rt.rpcCalls[0].payload.pageId, /^p-/, 'pageId 形如 p-…')
+  const report = page.lastFetch('dnotify/page-focus')
+  assert.equal(report.url, 'dnotify/page-focus', '文档相对路径')
+  assert.equal(report.init.method, 'POST')
+  const body = JSON.parse(report.init.body)
+  assert.equal(body.sessionId, 's-main')
+  assert.equal(body.focused, true)
+  assert.match(body.pageId, /^p-/)
 })
 
 test('没有会话被主视图保留时上报 null（宿主按"归属不明"照常推送）', async () => {
-  const rt = harness({ byId: { a: { id: 'a', retainedBy: { sidebarView: 1 } } } })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+  const page = createPage({ byId: { a: { id: 'a', retainedBy: { sidebarView: 1 } } } })
+  page.exports.apply(page.ctx)
   await tick()
-  assert.equal(rt.rpcCalls[0].payload.sessionId, null)
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).sessionId, null)
 })
 
 test('DOM 事件被显式包装：blur 不会因为 Event 对象被当成 focused=true', async () => {
-  const rt = harness({ byId: {} })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+  const page = createPage({ byId: {} })
+  page.exports.apply(page.ctx)
   await tick()
-  rt.rpcCalls.length = 0
 
-  rt.setFocused(false)
-  rt.dispatch('window', 'blur')          // 监听器收到 Event 对象
+  page.setFocused(false)
+  page.dispatch('window', 'blur')
   await tick()
-  assert.equal(rt.rpcCalls.length, 1)
-  assert.equal(rt.rpcCalls[0].payload.focused, false, 'blur 必须上报失焦')
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).focused, false, 'blur 必须上报失焦')
 
-  rt.setFocused(true)
-  rt.dispatch('window', 'focus')
+  page.setFocused(true)
+  page.dispatch('window', 'focus')
   await tick()
-  assert.equal(rt.rpcCalls[1].payload.focused, true)
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).focused, true)
 
-  // 最小化/后台标签：visibilityState 不是 visible 时一律算失焦
-  rt.setVisible(false)
-  rt.dispatch('document', 'visibilitychange')
+  page.setVisible(false)
+  page.dispatch('document', 'visibilitychange')
   await tick()
-  assert.equal(rt.rpcCalls[2].payload.focused, false)
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).focused, false)
 })
 
-test('pagehide 走 raw fetch + keepalive，且用文档相对路径', async () => {
-  const rt = harness({ byId: {} })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+test('pagehide 上报失焦并带 keepalive', async () => {
+  const page = createPage({ byId: {} })
+  page.exports.apply(page.ctx)
   await tick()
-  rt.dispatch('window', 'pagehide')
+  page.dispatch('window', 'pagehide')
   await tick()
-  assert.equal(rt.fetches.length, 1, 'pagehide 必须用 fetch（官方封装不带 keepalive）')
-  assert.equal(rt.fetches[0].url, 'dnotify/page-focus', '必须是文档相对路径')
-  assert.equal(rt.fetches[0].init.keepalive, true)
-  const body = JSON.parse(rt.fetches[0].init.body)
-  assert.equal(body.type, 'client-request')
-  assert.equal(body.method, 'page-focus')
-  assert.equal(body.payload.focused, false)
+  const report = page.lastFetch('dnotify/page-focus')
+  assert.equal(report.init.keepalive, true)
+  assert.equal(JSON.parse(report.init.body).focused, false)
 })
 
-test('聚焦心跳只在聚焦时上报，且间隔小于宿主 2 分钟保鲜期', async () => {
-  const rt = harness({ byId: {} })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+test('聚焦心跳只在聚焦时上报（间隔小于宿主 2 分钟保鲜期）', async () => {
+  const page = createPage({ byId: {} })
+  page.exports.apply(page.ctx)
   await tick()
-  const interval = [...rt.intervals][0]
-  assert.ok(interval, '必须挂心跳')
-  assert.ok(interval.ms <= 90000, `心跳间隔 ${interval.ms}ms 必须显著小于 120s`)
-
-  rt.rpcCalls.length = 0
-  interval.fn()
+  const before = page.fetches.length
+  page.advance(60000)
   await tick()
-  assert.equal(rt.rpcCalls.length, 1, '聚焦时心跳上报')
-  rt.setFocused(false)
-  interval.fn()
+  assert.equal(page.fetches.length, before + 1, '聚焦时心跳上报')
+  page.setFocused(false)
+  page.advance(60000)
   await tick()
-  assert.equal(rt.rpcCalls.length, 1, '失焦时心跳不打扰宿主')
+  assert.equal(page.fetches.length, before + 1, '失焦时心跳不打扰宿主')
 })
 
-test('sessions 服务晚就绪：订阅后立刻补报一次，不等下一次心跳', async () => {
-  const rt = harness({ byId: { 's-main': { id: 's-main', retainedBy: { mainView: 1 } } }, sessionsReady: false })
-  const exports = loadInto(rt)
-  exports.apply(rt.ctx)
+test('sessions 服务晚就绪：订阅后立刻补报一次', async () => {
+  const page = createPage({
+    byId: { 's-main': { id: 's-main', retainedBy: { mainView: 1 } } },
+    sessionsReady: false,
+  })
+  page.exports.apply(page.ctx)
   await tick()
-  assert.equal(rt.rpcCalls[0].payload.sessionId, null, '服务没就绪时只能报 null')
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).sessionId, null)
 
-  // 服务出现 → ctx.inject 回调触发
-  rt.services.sessions = {
+  page.services.sessions = {
     list: {
-      getSnapshot: () => rt.sessionsState,
-      subscribe: (fn) => { rt.subscribers.add(fn); return () => rt.subscribers.delete(fn) },
+      getSnapshot: () => page.sessionsState,
+      subscribe: (fn) => { page.subscribers.add(fn); return () => page.subscribers.delete(fn) },
     },
   }
-  rt.injects[rt.injects.length - 1].cb({
-    get: (n) => rt.services[n],
+  page.injects[page.injects.length - 1].cb({
+    get: (n) => page.services[n],
     effect: (fn) => { fn(); return () => {} },
   })
   await tick()
-  assert.equal(rt.rpcCalls.length, 2, '订阅后必须补报一次')
-  assert.equal(rt.rpcCalls[1].payload.sessionId, 's-main')
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).sessionId, 's-main')
 })
 
-test('会话切换即时重报；卸载后监听器/订阅/心跳全部清理', async () => {
-  const rt = harness({ byId: { s1: { id: 's1', retainedBy: { mainView: 1 } } } })
-  const exports = loadInto(rt)
-  const disposed = exports.apply(rt.ctx)
-  void disposed
+test('会话切换即时重报；卸载后监听器/订阅/SSE 全部清理', async () => {
+  const page = createPage({ byId: { s1: { id: 's1', retainedBy: { mainView: 1 } } } })
+  page.exports.apply(page.ctx)
   await tick()
-  const listenersBefore = rt.countListeners()
-  assert.ok(listenersBefore >= 8, `应挂上 8 个监听器（实际 ${listenersBefore}）`)
-  assert.equal(rt.subscribers.size, 1, '会话订阅已挂')
+  assert.ok(page.countListeners() >= 9, `应挂上 9 个监听器（实际 ${page.countListeners()}）`)
+  assert.equal(page.subscribers.size, 1)
+  assert.ok(page.state.eventSource, 'SSE 应已连接')
+  assert.equal(page.state.eventSource.url, 'dnotify/events')
 
-  rt.rpcCalls.length = 0
-  rt.sessionsState.byId = { s2: { id: 's2', retainedBy: { mainView: 1 } } }
-  rt.fireSubscribers()
+  page.sessionsState.byId = { s2: { id: 's2', retainedBy: { mainView: 1 } } }
+  page.fireSubscribers()
   await tick()
-  assert.equal(rt.rpcCalls.length, 1, '切换会话即时重报')
-  assert.equal(rt.rpcCalls[0].payload.sessionId, 's2')
+  assert.equal(JSON.parse(page.lastFetch('dnotify/page-focus').init.body).sessionId, 's2', '切换会话即时重报')
 
-  // 卸载：调 ctx.effect 返回的真实 disposer
-  for (const off of rt.disposers) off()
-  assert.equal(rt.countListeners(), 0, '所有 DOM 监听器都要摘掉')
-  assert.equal(rt.subscribers.size, 0, '会话订阅要退掉')
-  assert.equal(rt.intervals.size, 0, '心跳要清掉')
+  page.unsubscribe()
+  assert.equal(page.countListeners(), 0, '所有 DOM 监听器都要摘掉')
+  assert.equal(page.subscribers.size, 0, '会话订阅要退掉')
+  assert.equal(page.state.eventSource, null, 'SSE 要关掉')
+})
+
+test('点击投递：SSE 收到 navigate 后认领并执行跳转', async () => {
+  const page = createPage({
+    uiWorkspace: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'session:s-target' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  assert.equal(page.lastFetch('dnotify/claim').init.method, 'POST')
+  assert.deepEqual(page.opened, ['s-target'], '认领成功后切到该会话')
+})
+
+test('点击投递：认领失败（别的页面先拿到）时本页什么都不做', async () => {
+  const page = createPage({
+    uiWorkspace: {},
+    responses: { 'dnotify/claim': () => ({ ok: false, reason: 'none' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  assert.deepEqual(page.opened, [])
+})
+
+test('会话不在客户端目录里（openSession 抛错）时退回持久化 + 刷新', async () => {
+  const storage = new Map()
+  const page = createPage({
+    uiWorkspace: {},
+    openSessionThrows: true,
+    storage,
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'session:s-gone' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  assert.equal(storage.get('dsh.sessions.current'), JSON.stringify({ sessionId: 's-gone' }))
+  assert.equal(page.reloads, 1)
+})
+
+test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
+  const page = createPage({
+    pluginNavigation: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+})
+
+test('跳转 page:settings-plugins → 合成快捷键打开设置并点「内置插件」', async () => {
+  const cell = element('内置插件')
+  const modal = { querySelectorAll: () => [element('通用'), cell] }
+  const page = createPage({
+    pluginNavigation: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  page.advance(150)     // 第一轮：设置还没开 → 合成快捷键
+  await tick()
+  const keyEvent = page.state.keyboardEvents[0]
+  assert.ok(keyEvent, '应合成一次快捷键')
+  assert.equal(keyEvent.code, 'Comma')
+  assert.equal(keyEvent.ctrlKey, true, 'Windows/Linux 用 Ctrl')
+  assert.equal(keyEvent.metaKey, false)
+
+  page.setSettingsModal(modal)   // 设置弹窗出现了
+  page.advance(200)
+  await tick()
+  assert.equal(cell.clicks, 1, '应点开「内置插件」')
+  assert.deepEqual(page.opened, [], '设置已打开，不该再退到插件面板')
+})
+
+test('跳转 page:settings-plugins：设置打不开就退回插件面板', async () => {
+  const page = createPage({
+    pluginNavigation: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate')
+  await tick()
+  page.advance(5000)    // 40 次轮询后放弃 → 退路
+  await tick()
+  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+})
+
+test('旧式 hash 深链仍可用（#dsh-notify=…，处理完清掉 hash）', async () => {
+  const page = createPage({
+    hash: deepLink('page:plugins'),
+    pluginNavigation: {},
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+  assert.equal(page.hash, '', '处理完必须清掉 hash，避免刷新重复触发')
 })

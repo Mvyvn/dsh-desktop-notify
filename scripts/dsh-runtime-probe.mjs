@@ -15,6 +15,7 @@
 //   node --import <checkout>/node_modules/tsx/dist/esm/index.mjs scripts/dsh-runtime-probe.mjs
 // 没有 tsx 时该项标记 SKIP，其余检查照常。
 import { existsSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -52,22 +53,31 @@ const plugin = await import(pathToFileURL(join(REPO_ROOT, 'lib', 'index.js')).hr
 
 const sent = []
 const debugLines = []
-let rpcHandler = null
-let rpcChannel = ''
-let rpcDisposed = false
+let registeredRoute = null
+let routeDisposed = false
+let admitCalls = 0
+let admitRejection = undefined
 
 const rootSession = { id: 's1', header: { cwd: join('D:', 'ws', 'proj') } }
 const rootAgent = { id: 's1', session: rootSession }
 
+// 插件自带 /dnotify 路由（不再用 connection.rpc.handle：0.1.7-rc.2 里它的 owner 解析到
+// 服务注册 ctx 的影子 fiber，读 webServer 必撞注入守卫，通道根本挂不上——真实踩过的坑）。
+// 这里提供真实现需要的两个服务面：webServer.register + connection.admit。
 const ctx = new Context()
 ctx.plugin(Timer)
+ctx.provide('webServer', {
+  host: '127.0.0.1',
+  port: 3099,
+  register: (route) => {
+    registeredRoute = route
+    return () => { registeredRoute = null; routeDisposed = true }
+  },
+})
 ctx.provide('connection', {
-  rpc: {
-    handle(channel, handler) {
-      rpcChannel = channel
-      rpcHandler = handler
-      return () => { rpcDisposed = true }
-    },
+  admit: () => {
+    admitCalls += 1
+    return admitRejection === undefined ? { peer: { id: 'probe' } } : { rejection: admitRejection }
   },
 })
 ctx.provide('sessions', { get: () => undefined })
@@ -80,14 +90,42 @@ console.log = (...args) => debugLines.push(args.map(String).join(' '))
 const fiber = ctx.plugin(plugin, { debug: true, sender: (item) => { sent.push(item) } })
 await tick(30)
 
-check('插件能在真 cordis 里挂载（inject 的 connection/timer 都满足）', !fiber.error, String(fiber.error ?? ''))
+check('插件能在真 cordis 里挂载（inject 的 connection/timer/webServer 都满足）', !fiber.error, String(fiber.error ?? ''))
 check('desktopNotify 服务已注册', typeof ctx.get('desktopNotify')?.push === 'function')
-check('rpc 通道名正确', rpcChannel === '/dnotify', rpcChannel)
+check('自带 /dnotify 前缀路由已注册到 webServer', registeredRoute?.path === '/dnotify' && registeredRoute?.kind === 'prefix',
+  JSON.stringify({ path: registeredRoute?.path, kind: registeredRoute?.kind }))
 
-const okReply = await rpcHandler('page-focus', { focused: true, pageId: 'p1', sessionId: 's1' })
-check('rpc 返回 { ok: true, value } 结构', okReply?.ok === true && typeof okReply.value?.pages === 'number', JSON.stringify(okReply))
-const badReply = await rpcHandler('nope', {})
-check('rpc 未知 endpoint 返回结构化 error', badReply?.ok === false && !!badReply.error?.code, JSON.stringify(badReply))
+/** 用假 req/res 调一次真实路由（返回状态码与响应体）。 */
+async function hit(method, url, body) {
+  const route = registeredRoute
+  if (!route) throw new Error('路由未注册')
+  const req = new EventEmitter()
+  req.method = method
+  req.url = url
+  req.headers = {}
+  const res = new EventEmitter()
+  let status = 0
+  let text = ''
+  res.writeHead = (code) => { status = code }
+  res.write = (chunk) => { text += String(chunk); return true }
+  res.end = (chunk) => { if (chunk !== undefined) text += String(chunk); return res }
+  route.handler(req, res)
+  if (body !== undefined) process.nextTick(() => { req.emit('data', Buffer.from(JSON.stringify(body))); req.emit('end') })
+  else process.nextTick(() => req.emit('end'))
+  await tick(10)
+  return { status, text }
+}
+
+const focus = await hit('POST', '/dnotify/page-focus', { focused: true, pageId: 'p1', sessionId: 's1' })
+check('page-focus 走真实路由返回 { ok, pages }',
+  focus.status === 200 && JSON.parse(focus.text).ok === true, `${focus.status} ${focus.text}`)
+check('请求都过了 connection.admit（信任栅栏）', admitCalls > 0, `admitCalls=${admitCalls}`)
+admitRejection = 401
+const rejected = await hit('POST', '/dnotify/page-focus', { focused: true, pageId: 'p1' })
+check('admit 拒绝时返回 401', rejected.status === 401, String(rejected.status))
+admitRejection = undefined
+const unknown = await hit('GET', '/dnotify/nope')
+check('未知端点返回 404', unknown.status === 404, String(unknown.status))
 
 // ---- 作用域事件投递（需要 tsx 才能 import scope 包）----
 let scopeApi = null
@@ -97,7 +135,7 @@ try {
   skip('作用域事件投递（agent/status / session/event）', '用 tsx 运行本脚本才能加载 TS 源码的 scope 包')
 }
 if (scopeApi) {
-  await rpcHandler('page-focus', { focused: false, pageId: 'p1' })
+  await hit('POST', '/dnotify/page-focus', { focused: false, pageId: 'p1' })
   ctx.emit(scopeApi.scopeTarget(rootSession, undefined), 'session/event', rootSession, {
     type: 'assistant/message',
     data: { message: { content: [{ type: 'text', text: '真机 cordis 验证' }] } },
@@ -137,7 +175,7 @@ if (jobSubs.length === 1) {
 }
 
 // ---- 聚焦门控 + 对外 API 在真 cordis 下同样工作 ----
-await rpcHandler('page-focus', { focused: true, pageId: 'p1', sessionId: 's1' })
+await hit('POST', '/dnotify/page-focus', { focused: true, pageId: 'p1', sessionId: 's1' })
 const api = ctx.get('desktopNotify')
 const beforeAlways = sent.length
 check('正在看的会话 push 返回 false（被静默）', api.push({ title: '应被静默', sessionId: 's1' }) === false)
@@ -155,7 +193,7 @@ check('工作区名前缀来自 fs.resolve 的异步结果',
 await fiber.dispose()
 await tick(20)
 console.log = realLog
-check('卸载后 rpc handler 已注销', rpcDisposed)
+check('卸载后 /dnotify 路由已摘掉', routeDisposed && registeredRoute === null)
 check('卸载后 desktopNotify 服务已注销', ctx.get('desktopNotify') === undefined)
 check('卸载后 jobs 订阅已释放', jobSubs.includes('disposed'))
 
