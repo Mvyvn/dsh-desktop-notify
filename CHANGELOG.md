@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.2] - 2026-09-25
+
+- **新增启动播报**：每次 `dsh web` 启动后推一条通知——`插件启动成功:共有 N 个插件成功加载`；有插件没激活时改为 `有 N 个插件启动失败:加载失败的插件为 …`。数的是 `loader` 里的插件行（ACTIVE 算成功，FAILED / 没有 fiber / 等不来服务都算没起来并列出 `entry.options.id`，主动 `disabled` 不计入），每次启动只推一次。
+- **新增点击跳转**：点击通知打开 `http://127.0.0.1:<端口>/dnotify/click?t=<进程令牌>&target=<目标>`（只记录目标的落地页，浏览器会新开一个标签页）；已打开的 DSH 页面通过 SSE（`/dnotify/events`）收到目标，再用 `/dnotify/claim` **先到先得**认领，多页面并存时只切一个、切的是你正在用的那个页面。Windows 用 `activationType="protocol"`（不需要注册 COM 激活器），Linux 走 xdg-desktop-portal `OpenURI`（不起子进程）。
+  - 目标：会话通知 → `session:<id>`（`uiWorkspace.openSession`，子代理会话进子代理界面、后台任务回主会话）；启动播报 → `page:settings-plugins`（合成 ⌘/Ctrl+, 开「设置」再点「内置插件」，打不开则退回插件面板）；旧式 `#dsh-notify=` 深链兼容。
+  - 对外 API：`push`/`pushAlways`/`notify` 载荷新增 `url`（只接受 http/https）；只给 `sessionId` 时宿主自动生成会话链接。
+- **修复：聚焦上报与会话级静默从未生效**。DSH 0.1.7-rc.2 的 `connection.rpc.handle` 把 owner 解析成连接服务的影子 fiber，随后要 `owner.webServer.register(route)`（`rpc-host.ts:86-93/171-195`）——那条 fiber 链上读不到 `webServer`，cordis 抛 `cannot get property "webServer" without inject`，通道静默没注册（前端只看到 405）。改为插件自带 `/dnotify` 前缀路由（`ctx.webServer.register` + `connection.admit` 信任栅栏，纯 JSON POST）。
+- **插件简介**改为「DSH桌面通知」（原先一长串中英混排说明显示不下）；Toast XML 组装抽到 `lib/toast-xml.js`（转义/协议激活有纯函数单测）。
+- 两个已踩过的坑记在这里：① `ctx.timeout/ctx.effect` 返回 `Disposable<Promise<void>>`（可调用 + thenable，**没有 `.catch`**），在它上面调 `.catch` 会让整条路由 500——SSE 心跳改用自管 `setInterval`（自终止 + `unref`）；② BroadcastChannel 在同源同文档之间也会投递，靠它"交接给别的页面"会把跳转判给自己，所以投递改由宿主仲裁。
+- 测试：宿主 32 项 + 浏览器 14 项，全套 118 项；`theme-probe` / `dsh-runtime-probe` 真机契约自检通过。
+
 ## [1.4.0] - 2026-09-25
 
 - **适配 DSH 0.1.7-rc.2**：`jobs` 服务面在 0.1.7-alpha.1 被合并成一条事件流（`onJobDone`/`JobSnapshot` 已移除），改用 `jobs.events.subscribe({ owners: 'all' })` 的 `settled` 事件——`owner` 现在是 SessionId、`reported` 由 `awaited` 取代（已被等待方收走的结算不重复打扰），正文按 status 区分「已完成/失败/被终止」；`connection.rpc.handle` 回到两参签名并返回 `{ ok: true, value }` / `{ ok: false, error: { code, message, details } }`；删掉 `dsh.client.inject` 里并不存在的 `@deepseek-ai/dsh-client-runtime` 与对应 `peerDependencies`（声明了也不生效）。
