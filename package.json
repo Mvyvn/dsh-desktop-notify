@@ -43,7 +43,7 @@
   "contributors": [
     "苏拾柒 <seventeen_su@proton.me>"
   ],
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "homepage": "https://github.com/Mvyvn/dsh-desktop-notify",
   "repository": {
     "type": "git",

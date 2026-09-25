@@ -25,6 +25,8 @@ Copy-Item (Join-Path $repoRoot 'lib')              $target -Recurse -Force
 Copy-Item (Join-Path $repoRoot 'assets')           $target -Recurse -Force
 Copy-Item (Join-Path $repoRoot 'cordis.patch.yml') $target -Force
 Copy-Item (Join-Path $repoRoot 'package.json')     $target -Force
+# GPL 要求把许可证文本随作品一起交给接收者，所以安装副本里也要有一份
+Copy-Item (Join-Path $repoRoot 'LICENSE')          $target -Force
 $installedVersion = '0.0.0'
 try { $installedVersion = (Get-Content (Join-Path $target 'package.json') -Raw | ConvertFrom-Json).version } catch { }
 Write-Host "[dsh-desktop-notify] plugin files installed to $target (v$installedVersion)" -ForegroundColor Green

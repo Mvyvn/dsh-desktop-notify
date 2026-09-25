@@ -154,4 +154,12 @@ dsh-desktop-notify/
 
 ## License
 
-[MIT](LICENSE) © 2026 沐云 (Mvyvn)
+**GNU General Public License v3.0 or later (GPL-3.0-or-later)** — full text in [LICENSE](LICENSE); copyright and credit: **© 2026 沐云 (Mvyvn) &lt;mvyvn@qq.com&gt; and contributors** (see `author` / `contributors` in `package.json`).
+
+- **You may**: use, copy, distribute and modify it freely, **including commercially** (internal company use, shipping it with a product, or running a paid service).
+- **You must**: ① **attribute** — whether you redistribute the original or a modified version, you must **keep the author credit and copyright notice** (the line above, plus `author` / `contributors` in `package.json`); do not remove them or replace them with your own name; ② **stay open** — when you distribute a modified version, you must publish the complete corresponding source under the same license and state your changes.
+- No warranty (see GPL sections 15 and 16).
+
+> This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but **without any warranty**, without even the implied warranty of merchantability or fitness for a particular purpose.
+>
+> If you want the "modified version offered as a network service must also be open" clause spelled out, switch to **AGPL-3.0-or-later** (only the LICENSE and the manifest identifier change).

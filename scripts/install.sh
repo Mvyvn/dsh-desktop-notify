@@ -36,6 +36,8 @@ cp -R "$REPO_ROOT/lib"              "$TARGET/"
 cp -R "$REPO_ROOT/assets"           "$TARGET/"
 cp    "$REPO_ROOT/cordis.patch.yml" "$TARGET/"
 cp    "$REPO_ROOT/package.json"     "$TARGET/"
+# GPL 要求把许可证文本随作品一起交给接收者，所以安装副本里也要有一份
+cp    "$REPO_ROOT/LICENSE"          "$TARGET/"
 echo "[dsh-desktop-notify] plugin files installed to $TARGET"
 
 if [ "$(uname -s)" = "Linux" ]; then
