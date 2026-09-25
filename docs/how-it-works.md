@@ -55,7 +55,8 @@
 | 🚫 审批被自动拒绝 | `session/event` | `approval/decided` 且 `outcome==='rejected'` | `工作区/会话名:工具名-拒绝原因` |
 | 🤖 后台子代理结束 | `subagent/end` | 子代理收敛 | `工作区/主会话名:子代理名已完成` |
 | 🎯 目标完成 / 阻塞 | `goal/changed` | `complete` / `block` | `工作区/会话名:目标-已完成 / 目标-阻塞原因` |
-| 🧰 后台任务结束 | `jobs.events` 的 `settled` | 任务结算且 `awaited === false` | `工作区/会话名:后台任务名已完成/失败/被终止` |
+| 🧰 后台任务结束 | `jobs.events` 的 `settled` | 任务结算且 `awaited === false`（`kind='subagent'` 由上一行负责） | `工作区/会话名:后台任务名已完成/失败/被终止` |
+| 🚀 启动播报 | `loader` 的插件行状态 | 每次启动一次（等组合稳定后） | `插件启动成功:共有 N 个插件成功加载` / `有 N 个插件启动失败:加载失败的插件为 a、b` |
 
 - 前缀的**工作区按会话动态解析**（会话 `header.cwd` 的目录名；取不到用启动目录，多工作区并行时各显示自己的工作区）；会话名取 `sessionTitle` 服务。
 - 子代理/后台任务的主会话经 `session.header.parentSession` 回溯。
@@ -64,6 +65,51 @@
 - `kind === 'subagent'` 的 job 不在这里报：后台一次性子代理同时会走 `subagent/end`（`tool-subagent` 用 `jobs.start({ kind: 'subagent' })` 注册），两边都报就是两条 toast。
 - 根 agent 判定优先问 `agents.roots()`；服务缺失或此刻根列表为空时退回会话谱系（`header.origin === 'subagent'` / `delegationDepth`），避免"拿不到 roots 就把所有任务完成通知静默丢掉"。
 - 任务完成通知按"该会话有没有产出过内容"决定发不发（不按正文是否非空）：最后一轮只有工具调用时退化成"任务已完成"，而不是整条丢掉。
+
+## 启动播报
+
+- 触发：插件 `apply` 之后等组合稳定（`ctx.get('loader').await()`，与 app-boot 的启动审计同一原语）再数一遍 `ctx.get('loader').entries()`。
+- 判定：`fiber.state === 2`（ACTIVE）算加载成功；`3`（FAILED）、没有 fiber、等不来服务（PENDING/LOADING）都算"没加载起来"并列出 `entry.options.id`；`entry.disabled` 的行不计入。
+- 只推一次：进程级标记放 `globalThis`（模块被 HMR 重新求值也不会重播）；没有 `loader` 服务（非 profile 组合）就跳过。
+- 正文按用户要的格式：成功 `插件启动成功:共有 N 个插件成功加载`，失败 `有 N 个插件启动失败:加载失败的插件为 a、b`。
+
+## 点击跳转
+
+1. 宿主按当前通知的会话归属生成目标（`session:<id>`），启动播报用 `page:settings-plugins`；地址取自 `webServer` 服务的 `host:port`（退路 `DSH_WEB_URL`），拼成
+   `http://127.0.0.1:<port>/dnotify/click?t=<进程令牌>&target=<目标>`。令牌每次进程随机生成，防止任意网页靠 `<img>` 之类盲触发跳转。
+   > 1.6.1 曾注册 `dsh-notify:` 自定义协议 + 隐藏 PowerShell 一跳来避免"点击新开标签页"；
+   > 用户判定该做法低效（每次点击起一个进程），1.6.2 已按要求移除：统一走这个 http 落地页，
+   > **接受浏览器新开一个标签页**——那是系统打开 URL 的固有行为，浏览器也拒绝脚本关闭它。
+2. 发送层落地：
+   - **Windows**：Toast XML 加 `activationType="protocol"` + `launch=URL`，点击由系统交给浏览器打开（不需要注册 COM 激活器）；没有 URL 的 Toast 保持普通形态。
+   - **Linux**：`actions` 加 `default` 动作，等 `Notify` 回复拿到通知 id 并记下 id→URL；收到 `ActionInvoked` 后用 xdg-desktop-portal `OpenURI` 打开（无子进程）。
+3. 点击落地页（`/dnotify/click`）不是 DSH 页面，只做两件事：校验令牌并把目标存成"待认领"，返回一行提示并尝试 `window.close()`（浏览器通常拒绝脚本关闭系统打开的标签，于是它停在那行提示上）。
+4. 已打开的 DSH 页面通过 SSE（`/dnotify/events`）立刻收到目标 → `POST /dnotify/claim` 认领 → **先到先得，宿主只放行一个页面**（认领即清空），所以多页面并存时只切一个，切的是"你已经在用的那个页面"（新开的落地标签页不参与跳转）。
+5. 客户端执行目标：
+   - `session:<id>` → `ctx.get('uiWorkspace').openSession(id)`（与点侧栏会话行同一条链路）；服务未就绪就重试；会话不在客户端目录里（同步抛错）则退回"写 `dsh.sessions.current` + 整页刷新"。子代理会话由 ui-workspace 自己的规则解析成**子代理界面**；后台任务通知的目标就是它的**主会话**。
+   - `page:settings-plugins` → 合成 ⌘/Ctrl+, 打开「设置」，再点弹窗里的「内置插件」导航格；两条路（快捷键、账号菜单）都不行就退回**插件面板**。
+   - `page:plugins` → `ctx.get('pluginNavigation').openBundle('dsh-desktop-notify')`（退路 `layout.selectPanel('plugins')`）。
+6. 旧的 `#dsh-notify=<目标>` hash 形式仍兼容：解析后立刻 `history.replaceState` 清掉，避免刷新重复触发。
+
+> ⚠️ SSE 心跳别碰 cordis 定时器的返回值：`ctx.timeout/ctx.effect` 返回的是
+> `Disposable<Promise<void>>`（`fiber.ts:64-74`：**可调用 + thenable，没有 `.catch`**）。
+> 1.6.1 在它上面调了 `.catch`，结果 SSE 一建立就抛 `keepAlive.catch is not a function`，
+> 整条 `/dnotify` 请求失败、跳转全挂。现在心跳用自管的 `setInterval`（自终止 + `unref`）。
+
+## 与宿主的通信：自带的 /dnotify 路由
+
+浏览器半区不再用 DSH 的 `connection.rpc.handle`——0.1.7-rc.2 里 `rpc` 取值器把 owner 解析成服务注册 ctx 的**影子 fiber**（`service.ts` 的 `symbols.shadow`），随后 `handle` 内部要 `owner.webServer.register(route)`（`rpc-host.ts:86-93/171-195`）：实测那条 fiber 链上读不到 `webServer`，cordis 注入守卫直接抛 `cannot get property "webServer" without inject`——把 `webServer` 写进插件 inject 也没用（查的不是本插件的 fiber），于是路由静默没挂上，前端只看到 405/404。DSH 自己的生产代码只用 `rpc.intercept`（不碰 webServer），`handle` 实际只在测试里用。
+
+于是插件自带一个 `/dnotify` 前缀路由（`ctx.webServer.register`；`webServer` 必须写在插件 `inject` 里）：
+
+| 端点 | 方法 | 用途 |
+| --- | --- | --- |
+| `/dnotify/page-focus` | POST | 页面聚焦状态 + 当前选中会话（会话级门控的输入） |
+| `/dnotify/events` | GET | SSE：把待处理的跳转推给已打开的页面（25s 心跳注释保活） |
+| `/dnotify/claim` | POST | 认领跳转，先到先得（返回 `{ ok, target }`） |
+| `/dnotify/click` | GET | 通知点击落地页（进程令牌校验；记录目标 + 自关） |
+
+除 `/click` 外都先过 `ctx.connection.admit(req)`（DSH 自己的 Host/Origin 栅栏 + 浏览器鉴权）：没有页面 cookie 的请求得到 401，不会误触发状态。`/click` 用进程令牌校验——它是系统/浏览器直接打开的顶层导航（没有 Origin，也不该要求 cookie）。
 
 ## 为什么审批被拒走 `session/event` 而不是 `approval/request`
 

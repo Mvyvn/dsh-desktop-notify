@@ -3,7 +3,8 @@
 ## 包结构
 
 ```
-lib/index.js          宿主半区（ESM，export name/inject/apply(ctx, config)；按平台动态加载发送层）
+lib/index.js          宿主半区（ESM，export name/inject/apply(ctx, config)；按平台动态加载发送层；
+                      自带 /dnotify 前缀路由：聚焦上报 + SSE 推送 + claim 认领 + 点击落地页）
 lib/gate.js           按"页面 × 会话"的聚焦门控（纯逻辑，tests/gate.test.mjs 覆盖）
 lib/api.js            对外推送 API（desktopNotify 服务的载荷归一与双模式路由，tests/api.test.mjs 覆盖）
 lib/winrt.js          Windows 发送层（koffi 直调 WinRT + AUMID 注册表写入）
@@ -15,9 +16,12 @@ lib/theme-codec.js    主题判定纯逻辑（注册表 DWORD / portal color-sch
 lib/theme-win32.js    Windows 主题后端（注册表读取 + RegNotifyChangeKeyValue 变更事件）
 lib/theme-linux.js    Linux 主题后端（xdg-desktop-portal Read + SettingChanged 信号）
 lib/icons.js          按主题解析图标路径（深浅两套 + 旧路径回退，tests/icons.test.mjs 覆盖）
+lib/toast-xml.js      Windows Toast XML 组装（转义 + 协议激活点击跳转，tests/toast-xml.test.mjs 覆盖）
 lib/state.js          有界容器与去重（tests/state.test.mjs 覆盖）
 lib/text.js           代理对安全的截断（tests/text.test.mjs 覆盖）
-lib/client.js         浏览器半区（window.__ModuleLoader__.load 包裹，标准 cordis client 插件）
+lib/client.js         浏览器半区（window.__ModuleLoader__.load 包裹，标准 cordis client 插件；
+                      聚焦/会话上报走自带的 dnotify/page-focus，点击跳转走 SSE + claim 认领，
+                      并兼容旧式 #dsh-notify 深链，tests/client.test.mjs 覆盖）
 assets/               通知图标：dsh-dark.{png,ico} 白鱼 / dsh-light.{png,ico} 黑鱼；dsh.{png,ico} 兼容副本
                       （均由 scripts/make-icon.py 从 dsh-logo.svg 栅格化）
 scripts/              install.ps1 / install.sh（安装）、check-syntax.mjs（语法自检）
@@ -31,7 +35,7 @@ cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profi
 
 | 服务 | 内容 | 说明 |
 | --- | --- | --- |
-| `desktopNotify` | `push(item)` / `pushAlways(item)` / `notify(item)` | `ctx.provide` 注册；`push` 走聚焦门控（按会话）并如实返回是否入队，`pushAlways` 绕过门控，`notify` 返回 `{ ok, queued, silenced, reason }`。载荷 `{ title, message?, urgency?, sessionId? }`，逻辑在 `lib/api.js` |
+| `desktopNotify` | `push(item)` / `pushAlways(item)` / `notify(item)` | `ctx.provide` 注册；`push` 走聚焦门控（按会话）并如实返回是否入队，`pushAlways` 绕过门控，`notify` 返回 `{ ok, queued, silenced, reason }`。载荷 `{ title, message?, urgency?, sessionId?, url? }`（`url` = 点击跳转地址，http/https；不传则按 `sessionId` 自动生成会话链接），逻辑在 `lib/api.js` |
 
 其它插件 `ctx.get('desktopNotify')` 取用（可选服务），或 `inject: ['desktopNotify']` 声明硬依赖。
 
