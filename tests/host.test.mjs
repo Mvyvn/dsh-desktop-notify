@@ -303,7 +303,7 @@ test('路由的信任栅栏：connection.admit 拒绝时返回 401/403，不处�
   assert.equal(ok.status, 200)
 })
 
-test('点击落地页：令牌不对返回 403，令牌正确则记录目标', async () => {
+test('点击落地页：跨站触发被拒（403），令牌正确则记录目标', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   // 令牌只从插件自己发出的点击链接里能拿到（同一进程内一致）
   h.services.desktopNotify.pushAlways({ title: '取令牌', sessionId: 's1' })
@@ -311,8 +311,14 @@ test('点击落地页：令牌不对返回 403，令牌正确则记录目标', a
   const token = h.clickToken()
   assert.ok(token, '通知的点击链接里应带进程令牌')
 
-  const bad = await h.request({ method: 'GET', url: '/dnotify/click?t=wrong&target=session:s1' })
-  assert.equal(bad.status, 403)
+  // 跨站触发（别的网页用 <img>/fetch 盲触发）→ 403
+  const crossSite = await h.request({
+    method: 'GET',
+    url: `/dnotify/click?t=${token}&target=${encodeURIComponent('session:s1')}`,
+    headers: { 'sec-fetch-site': 'cross-site' },
+  })
+  assert.equal(crossSite.status, 403)
+  assert.equal(crossSite.body, 'forbidden')
 
   const target = 'session:s1'
   const good = await h.request({ method: 'GET', url: `/dnotify/click?t=${token}&target=${encodeURIComponent(target)}` })
@@ -325,12 +331,34 @@ test('点击落地页：令牌不对返回 403，令牌正确则记录目标', a
   assert.deepEqual(JSON.parse(second.body), { ok: false, reason: 'none' })
 })
 
+test('点击落地页：旧通知的令牌（上一次运行/上一次 apply）仍放行', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  // 用户点的是之前发出的通知：令牌不是本进程的，但请求来自用户导航（无 cross-site）
+  const stale = await h.request({ method: 'GET', url: '/dnotify/click?t=stale-token&target=session%3As9' })
+  assert.equal(stale.status, 200, '不该回 forbidden')
+  assert.match(stale.body, /已通知 DSH 切换/)
+  const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1' } })
+  assert.deepEqual(JSON.parse(claim.body), { ok: true, target: 'session:s9' })
+})
+
+test('点击令牌在同一进程内跨 apply 复用（热更新不会让已发出的通知失效）', async () => {
+  const first = await start({ roots: [ROOT_AGENT] })
+  first.services.desktopNotify.pushAlways({ title: '第一次', sessionId: 's1' })
+  first.advance(500)
+  const second = await start({ roots: [ROOT_AGENT] })
+  second.services.desktopNotify.pushAlways({ title: '第二次', sessionId: 's1' })
+  second.advance(500)
+  assert.ok(first.clickToken(), '第一次 apply 应发出带令牌的链接')
+  assert.equal(second.clickToken(), first.clickToken(), '同一进程内两次 apply 的令牌必须一致')
+})
+
 test('点击落地页：非法目标被忽略（不会进待认领队列）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   h.services.desktopNotify.pushAlways({ title: '取令牌', sessionId: 's1' })
   h.advance(500)
   const bad = await h.request({ method: 'GET', url: `/dnotify/click?t=${h.clickToken()}&target=${encodeURIComponent('javascript:alert(1)')}` })
   assert.equal(bad.status, 200)
+  assert.match(bad.body, /这条通知的目标已失效/)
   const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1' } })
   assert.deepEqual(JSON.parse(claim.body), { ok: false, reason: 'none' })
 })
