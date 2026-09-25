@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.0] - 2026-09-25
+
+- **适配 DSH 0.1.7-rc.2**：`jobs` 服务面在 0.1.7-alpha.1 被合并成一条事件流（`onJobDone`/`JobSnapshot` 已移除），改用 `jobs.events.subscribe({ owners: 'all' })` 的 `settled` 事件——`owner` 现在是 SessionId、`reported` 由 `awaited` 取代（已被等待方收走的结算不重复打扰），正文按 status 区分「已完成/失败/被终止」；`connection.rpc.handle` 回到两参签名并返回 `{ ok: true, value }` / `{ ok: false, error: { code, message, details } }`；删掉 `dsh.client.inject` 里并不存在的 `@deepseek-ai/dsh-client-runtime` 与对应 `peerDependencies`（声明了也不生效）。
+- **修复会话级静默完全失效**：客户端会话快照（`SessionListState`）里**没有** `current` 字段，浏览器半区改读 `byId[*].retainedBy.mainView > 0`（官方 ui-layout / ui-session / ui-open-in-app 用的同一判据）；上报改走官方 `ctx.get('connection').rpc.call`（载体可能不是 fetch），只有 `pagehide` 那一次用 raw fetch（要 `keepalive`）且改文档相对路径；会话订阅改用 `ctx.inject` 等服务就绪；新增 1 分钟聚焦心跳，避免「盯着屏幕读两分钟没碰鼠标」被保鲜超时误判为失焦而误弹。
+- **新增深浅两套通知图标 + 系统主题跟踪**：通知背景跟随系统深浅色，而图标不会被反色——随包新增 `assets/dsh-light.{png,ico}`（黑鱼，浅色主题用）与 `assets/dsh-dark.{png,ico}`（白鱼），发送时按当前主题选一套（旧路径 `dsh.{png,ico}` 保留为深色版本副本）。Windows 读 `HKCU\...\Themes\Personalize\SystemUsesLightTheme`（退 `AppsUseLightTheme`），用 `RegNotifyChangeKeyValue` 异步事件 + 2 秒非阻塞句柄检查跟踪切换；Linux 读 xdg-desktop-portal 的 `OrgFreedesktopAppearance/color-scheme` 并订阅 `SettingChanged` 信号；两条通道都挂 60 秒兜底重读，读不到时保持原值（绝不把「读不到」当成浅色）。主题变化时同步改写 AUMID 图标，通知中心的应用图标一起换色。
+- **Linux D-Bus 层重写**：抽出 `lib/dbus.js`（常驻会话总线：SASL EXTERNAL → **Hello** 注册 → 方法调用与回复按 serial 配对 → `AddMatch` 信号订阅 → 断线重连/冷却/错误去重），通知发送与主题跟踪共用一条连接；补齐总线强制的 `Hello` 握手（没有它连信号订阅都做不了），并修正 `method_return` 里 `REPLY_SERIAL`/`UNIX_FDS` 被当字符串解码导致回复整体错位的问题。
+- **修复与加固**：`fs.resolve` 是异步的，默认工作区名原先恒为空串（多工作区回退场景前缀丢失）；`agents.roots()` 拿不到或为空时不再把「任务完成」通知整类静默丢掉（退回会话谱系判断）；按会话/按 id 的缓存全部改为有界容器（回复摘要 64 / 审批配对 64 / 提问时刻 32，超出淘汰最旧），常驻进程不再随会话数增长；同文案 1.5 秒内只弹一次；待发队列上限 32 条；`desktopNotify` 服务重复注册不再让整个插件挂掉；热更新时「新 apply 先跑、旧 cleanup 后跑」不会把新的主题监听停掉。
+- **对外 API 语义修正**：`push()` 原先只要载荷有效就返回 `true`（被静默时也是 `true`），现在只有**真的入队**才返回 `true`，并新增 `notify(item)` 返回 `{ ok, queued, silenced, reason }` 明细（`reason`: `''` / `invalid-payload` / `silenced` / `duplicate` / `dropped`）。
+- **自检工具**：`scripts/check-syntax.mjs`（自动枚举 `lib/*.js` 逐个 `node --check`）、`scripts/theme-probe.mjs`（主题检查 + 切换事件链路自检，用临时注册表键，不碰系统主题）、`scripts/dsh-runtime-probe.mjs`（把宿主半区挂进 DSH 自带的 cordis 跑注入/作用域事件/延迟注册/注销清理的契约自检，不发真实通知）；`scripts/make-icon.py` 一次生成深浅两套图标。
+
 ## [1.3.12] - 2026-09-11
 
 - **新增 Linux 支持**：`lib/toast-linux.js` 用纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL 握手 → `org.freedesktop.Notifications.Notify`），不调用 `notify-send`、不新增依赖；连接常驻复用、断开自动重连，编组逻辑有单测（`npm test`）。`lib/index.js` 按平台动态加载发送层——win32 之外不再 import koffi。
