@@ -96,7 +96,7 @@ function createPage(options = {}) {
         state.eventSource = this
       }
       addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn) }
-      emit(type) { for (const fn of this.handlers[type] || []) fn({ type }) }
+      emit(type, data) { for (const fn of this.handlers[type] || []) fn({ type: type, data: data }) }
       close() { this.readyState = 2; state.eventSource = null }
     },
     KeyboardEvent: class {
@@ -326,7 +326,7 @@ test('会话切换即时重报；卸载后监听器/订阅/SSE 全部清理', as
   assert.ok(page.countListeners() >= 9, `应挂上 9 个监听器（实际 ${page.countListeners()}）`)
   assert.equal(page.subscribers.size, 1)
   assert.ok(page.state.eventSource, 'SSE 应已连接')
-  assert.equal(page.state.eventSource.url, 'dnotify/events')
+  assert.match(page.state.eventSource.url, /^dnotify\/events\?pageId=/, 'SSE 要带上自己的 pageId（宿主据此定向投递）')
 
   page.sessionsState.byId = { s2: { id: 's2', retainedBy: { mainView: 1 } } }
   page.fireSubscribers()
@@ -346,20 +346,24 @@ test('点击投递：SSE 收到 navigate 后认领并执行跳转', async () => 
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
-  assert.equal(page.lastFetch('dnotify/claim').init.method, 'POST')
+  const claim = page.lastFetch('dnotify/claim')
+  assert.equal(claim.init.method, 'POST')
+  const claimBody = JSON.parse(claim.init.body)
+  assert.equal(claimBody.openId, 'op-1', '认领必须带上事件里的 openId（否则两次点击会串单）')
+  assert.ok(claimBody.pageId, '认领要带 pageId')
   assert.deepEqual(page.opened, ['s-target'], '认领成功后切到该会话')
 })
 
-test('点击投递：认领失败（别的页面先拿到）时本页什么都不做', async () => {
+test('点击投递：认领失败（别的页面先拿到/已过期）时本页什么都不做', async () => {
   const page = createPage({
     uiWorkspace: {},
-    responses: { 'dnotify/claim': () => ({ ok: false, reason: 'none' }) },
+    responses: { 'dnotify/claim': () => ({ ok: false, reason: 'stale' }) },
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   assert.deepEqual(page.opened, [])
 })
@@ -374,7 +378,7 @@ test('会话不在客户端目录里（openSession 抛错）时退回持久化 +
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   assert.equal(storage.get('dsh.sessions.current'), JSON.stringify({ sessionId: 's-gone' }))
   assert.equal(page.reloads, 1)
@@ -387,7 +391,7 @@ test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
 })
@@ -401,7 +405,7 @@ test('跳转 page:settings-plugins → 合成快捷键打开设置并点「内�
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   page.advance(150)     // 第一轮：设置还没开 → 合成快捷键
   await tick()
@@ -425,7 +429,7 @@ test('跳转 page:settings-plugins：设置打不开就退回插件面板', asyn
   })
   page.exports.apply(page.ctx)
   await tick()
-  page.state.eventSource.emit('navigate')
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   page.advance(5000)    // 40 次轮询后放弃 → 退路
   await tick()
