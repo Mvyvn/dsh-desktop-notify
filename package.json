@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-notify",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "DSH桌面通知",
   "type": "module",
   "main": "lib/index.js",
