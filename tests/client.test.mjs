@@ -368,7 +368,7 @@ test('点击投递：认领失败（别的页面先拿到/已过期）时本页�
   assert.deepEqual(page.opened, [])
 })
 
-test('会话不在客户端目录里（openSession 抛错）时退回持久化 + 刷新', async () => {
+test('会话不在客户端目录里（openSession 抛错）时明确失败：不写持久化、**不刷新页面**', async () => {
   const storage = new Map()
   const page = createPage({
     uiWorkspace: {},
@@ -380,8 +380,9 @@ test('会话不在客户端目录里（openSession 抛错）时退回持久化 +
   await tick()
   page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
-  assert.equal(storage.get('dsh.sessions.current'), JSON.stringify({ sessionId: 's-gone' }))
-  assert.equal(page.reloads, 1)
+  // 旧实现会写 localStorage + location.reload()：hash 已被清掉 → 页面原地刷新但不跳转
+  assert.equal(storage.get('dsh.sessions.current'), undefined, '不该再写持久化选中项')
+  assert.equal(page.reloads, 0, '绝不刷新页面')
 })
 
 test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
