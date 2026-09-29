@@ -429,6 +429,22 @@ test('点击令牌在同一进程内跨 apply 复用（热更新不会让已发�
   assert.equal(second.clickToken(), first.clickToken(), '同一进程内两次 apply 的令牌必须一致')
 })
 
+test('launch 默认走浏览器落地页（实测协议激活在未打包宿主上不触发），可显式改回协议', async () => {
+  // 默认：launch 是 http 落地页 —— 浏览器必然打开它，因此点击一定能到达宿主
+  const byDefault = await start({ roots: [ROOT_AGENT] })
+  byDefault.services.desktopNotify.pushAlways({ title: '默认', click: { type: 'session', sessionId: 's1' } })
+  byDefault.advance(500)
+  const fallbackClick = byDefault.sent[0].click
+  assert.equal(fallbackClick.wire, 'session:s1')
+  assert.equal(fallbackClick.scheme, '', '默认不带自定义协议')
+  assert.match(fallbackClick.fallback, /^http:\/\/127\.0\.0\.1:3080\/dnotify\/click\?t=[^&]+&raw=session%3As1$/)
+  // 显式选择协议模式：launch 变成 dsh-notify:<目标>（不新开标签，但依赖系统投递激活）
+  const byProtocol = await start({ roots: [ROOT_AGENT], config: { launchMode: 'protocol' } })
+  byProtocol.services.desktopNotify.pushAlways({ title: '协议', click: { type: 'session', sessionId: 's1' } })
+  byProtocol.advance(500)
+  assert.equal(byProtocol.sent[0].click.scheme, 'dsh-notify:session:s1')
+})
+
 test('点击落地页：非法目标被忽略（不投递、不打开）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
