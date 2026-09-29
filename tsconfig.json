@@ -1,0 +1,45 @@
+{
+  // DSH 桌面通知 — TypeScript 6 配置（同时面向 TS7 的迁移基线）
+  //
+  // 目标不是"能编译就行"，而是让**非法状态不可表达**：
+  //   · strict 全家桶 + noUncheckedIndexedAccess：每个 Map/数组取值都必须处理 undefined
+  //   · exactOptionalPropertyTypes：可选字段不允许被显式赋 undefined
+  //   · erasableSyntaxOnly：禁止 enum/namespace/参数属性等"会改变运行时"的 TS 语法，
+  //     与 TS7 的类型擦除方向一致（TS7 默认按此约束检查）
+  //   · verbatimModuleSyntax + isolatedModules：import/export 逐字保留，单文件可转译
+  //   · nodenext：输出真正的 ESM（插件由 DSH 的 Node 直接加载 lib/*.js）
+  //
+  // 输出：src/**/*.ts → lib/**/*.js（提交进仓库，安装脚本按 lib/ 分发）。
+  // 迁移策略见 docs/migration-ts6-ts7.md：先把"点击/页面/激活"三套状态机与协议类型化，
+  // 再逐步迁移平台后端（WinRT / D-Bus / 主题）与宿主生命周期。
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "rootDir": "src",
+    "outDir": "lib",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false,
+    "newLine": "lf"
+  },
+  "include": ["src/**/*.ts"]
+}

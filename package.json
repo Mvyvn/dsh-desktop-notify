@@ -15,7 +15,9 @@
     "cordis.patch.yml"
   ],
   "scripts": {
+    "build": "tsc -p tsconfig.json",
     "check": "node scripts/check-syntax.mjs",
+    "pretest": "npm run build",
     "test": "node scripts/run-tests.mjs"
   },
   "dsh": {
@@ -28,6 +30,14 @@
   },
   "dependencies": {
     "koffi": "^3.1.6"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.1.7-rc.2 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
   },
   "keywords": [
     "dsh",
@@ -54,5 +64,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^6.0.3"
   }
 }
