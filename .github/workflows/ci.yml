@@ -9,6 +9,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # 挂死必须快速失败：曾经因为测试进程不退出，两个矩阵任务各烧满 GitHub 的 6 小时上限
+    # （结论是 "cancelled" 而不是某个断言失败，极难定位）。10 分钟足够跑完全部检查。
+    timeout-minutes: 10
     strategy:
       # 两个版本线都跑：测试入口曾因 Node 20 与 22+ 对 `node --test` 参数处理不同，
       # 本地（24）全绿却只在 CI（20）挂掉。
@@ -20,10 +23,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          cache: npm
+      # ⚠️ 必须先装依赖：`npm test` 的 `pretest` 会用 tsc 编译 src/**/*.ts（typescript 在
+      # devDependencies），缺这一步在 runner 上会直接失败——本地因为 node_modules 已存在看不出来。
+      # --ignore-scripts：CI 不需要 koffi 的原生构建（没有测试 import winrt，平台预编译包照常安装），
+      # 跳过安装脚本更快也更稳。
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
       - name: Syntax check (every lib/*.js module)
         run: npm run check
       - name: Unit tests (host event flow / focus gate / public API / D-Bus / theme / icons / state)
         run: npm test
+      # 提交进仓库的 lib/*.js 必须与 src/**/*.ts 一致：CI 里重跑构建，产物有差异就失败。
+      # （没有这一步，改了 src 却忘记提交 lib 的人会把问题留到用户机器上。）
+      - name: Build output is committed and up to date
+        run: git diff --exit-code -- lib
       - name: Theme + icon self-check (Linux path; no desktop bus in CI)
         run: node scripts/theme-probe.mjs
       # scripts/dsh-runtime-probe.mjs（把插件挂进 DSH 自带的 cordis 跑契约自检）故意不在这里跑：
