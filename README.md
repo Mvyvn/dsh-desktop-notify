@@ -1,6 +1,6 @@
 # DSH 桌面通知（dsh-desktop-notify）
 
-为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载（无需审批）。当前适配 **DSH 0.1.7-rc.2**（`jobs` 服务面、客户端会话快照等契约按该版本实现）。
+为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载（无需审批）。当前适配 **DSH 0.1.7-rc.2 与 0.2.0-rc.2**（两个版本之间本插件依赖的服务面——`connection` / `webServer` / `jobs` / `subagent` / `scope` / `loader` / cordis——零改动，已实测）；包内声明 `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.2 <0.3.0" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合。
 
 - **任务完成**：agent 干完活回到空闲时，弹「✅ DSH 任务完成」+「工作区/会话名:结尾输出内容」
 - **等待你回答**：AI 发起 `ask_user_question` 提问时，弹「❓ DSH 等待你的输入」提醒你回来
@@ -95,40 +95,57 @@ export function apply(ctx) {
   const result = desktopNotify.notify({ title: '构建完成', sessionId: agent.session })
   // { ok: true, queued: false, silenced: true, reason: 'silenced' }
 
-  // 4) 点击跳转：url 可选；不传时按 sessionId 自动生成"跳回该会话"的链接
-  desktopNotify.push({ title: '构建完成', sessionId: agent.session })
-  desktopNotify.push({ title: '打开文档', url: 'https://example.com/doc' })   // 只接受 http/https
+  // 4) 点击跳转：用 click 显式声明（四态），**不传 click 就是不可点击**
+  desktopNotify.push({ title: '构建完成', sessionId: agent.session,
+    click: { type: 'session', sessionId: agent.session } })          // 点了跳回该会话
+  desktopNotify.push({ title: '打开文档', click: { type: 'url', url: 'https://example.com/doc' } })
+  desktopNotify.push({ title: '随便看看' })                            // 点了不跳转
 }
 ```
 
 - 返回 `true` 表示**真的入队了**；被聚焦门控静默、命中同文案去重（1.5 秒窗口）、或当前平台没有通知后端时都返回 `false`（想区分原因用 `notify()`，它在载荷无效时返回 `{ ok: false, reason: 'invalid-payload' }`）。**标题为空一律 `false` 且不推送**（避免空通知）。`pushAlways` 是"强制弹"：既不看门控也不进去重窗口。
 - `title` 最长 160 字符、`message` 最长 400 字符，超出截断（不会切断 emoji 这类代理对）；队列仍按 200ms 间隔逐条发送，队列上限 32 条（超出丢最旧的）。
-- `sessionId` 可传会话对象、会话 id 或它们的数组（子代理场景可同时传主会话与子会话）。`url` 是**点击通知要打开的地址**（只接受 http/https）；不传 `url` 但传了 `sessionId` 时，宿主自动生成"跳回该会话"的链接；两者都没有则通知不可点击。
+- **`sessionId` 只管门控，`click` 只管点击**——两件事彻底分开（1.6.0 起）。`click` 是四态联合：
+  | `click` | 点击后 |
+  | --- | --- |
+  | 不传 / `null` | **不跳转**（通知不可点击） |
+  | `{ type: 'session', sessionId }` | 跳到该会话（子代理会话会进子代理界面） |
+  | `{ type: 'page', page: 'settings-plugins' \| 'plugins' }` | 跳到该内置页面 |
+  | `{ type: 'url', url: 'https://…' }` | 打开外部地址（只接受 http/https） |
+  形状不认识（缺字段、`page` 不在白名单、`url` 非 http(s)）一律当成**不可点击**——不猜测意图。旧字段 `url: 'https://…'` 仍然兼容，等价于 `{ type: 'url', url }`。
+- `sessionId` 可传会话对象、会话 id 或它们的数组（子代理场景可同时传主会话与子会话）。
 - 想全局取用可写 `inject: ['desktopNotify']`（硬依赖，本插件缺失时你的插件不会加载）；否则用 `ctx.get` 按可选服务处理。
 
 ## 项目结构
 
 ```
 dsh-desktop-notify/
-├── lib/          # 宿主端 index.js（门控/队列/平台分发）+ gate.js（按会话门控）+ api.js（对外推送 API）
-│                 # 发送层：winrt.js（Windows / koffi 直调 WinRT）、toast-linux.js（Linux / D-Bus 直连）
+├── src/          # TypeScript 6 源码（strict + erasableSyntaxOnly，TS7 就绪）→ 编译到 lib/
+│                 # protocol.ts（ClickTarget 四态 + 线格式）、pages.ts（页面注册表状态机）
+│                 # activation.ts（三态激活决策）、gate.ts（按会话门控）、api.ts（对外推送 API）
+│                 # text.ts（截断）、notify.ts（通知载荷模型）
+├── lib/          # 构建产物 + 尚未迁移的手写模块
+│                 # 宿主端 index.js（路由/队列/事件）+ 发送层 winrt.js（Windows / koffi 直调 WinRT）
+│                 #                                   toast-linux.js（Linux / D-Bus 直连）
 │                 # 主题：theme.js（状态+平台分发）、theme-win32.js（注册表+变更事件）、theme-linux.js（portal+信号）
 │                 #       theme-codec.js（判定纯逻辑）、icons.js（按主题选图标）
 │                 # 基础设施：dbus.js（常驻会话总线：Hello/调用/信号）、win32-registry.js（注册表+等待句柄）
-│                 #             state.js（有界容器+去重）、text.js（截断）、client.js（浏览器端聚焦/会话上报）
+│                 #             state.js（有界容器+去重）、client.js（浏览器端聚焦/会话上报）
 ├── assets/       # 通知图标：dsh-dark.{png,ico}（白鱼/深色主题）、dsh-light.{png,ico}（黑鱼/浅色主题）
 │                 #             dsh.{png,ico} 为旧路径兼容副本
 ├── scripts/      # 安装脚本 install.ps1 / install.sh、语法自检 check-syntax.mjs
 │                 # 冒烟测试 winrt-probe.mjs（真发一条 Toast）、theme-probe.mjs（主题检查+切换事件）
 │                 # 契约自检 dsh-runtime-probe.mjs（把宿主半区挂进 DSH 自带的 cordis 真跑一遍）
 │                 # 图标生成 make-icon.py（开发期换图用，需 Python）
-├── tests/        # node --test 单测（宿主集成事件流 / 浏览器半区 / 聚焦门控 / 对外 API
-│                 #                / D-Bus 编组与解码 / 主题判定 / 图标解析 / 有界容器 / 文本截断）
-├── docs/         # 架构、原理、上手文档
+├── tests/        # node --test 单测（协议/注册表/激活决策 / 宿主集成事件流 / 浏览器半区 / 聚焦门控
+│                 #                / 对外 API / D-Bus 编组与解码 / 主题判定 / 图标解析 / 有界容器 / 文本截断）
+├── docs/         # 架构、原理、上手文档 + TS6→TS7 迁移路线
 ├── screenshots/
 ├── cordis.patch.yml
 └── package.json
 ```
+
+> 构建：`npm run build`（`tsc -p tsconfig.json`）。`npm test` 会先自动构建；提交时请一并提交 `lib/` 下的构建产物（插件运行时直接加载 `lib/`，DSH 不做编译）。迁移进度见 [docs/migration-ts6-ts7.md](docs/migration-ts6-ts7.md)。
 
 ## 工作机制与限制
 
@@ -138,12 +155,19 @@ dsh-desktop-notify/
   - **Linux（`lib/toast-linux.js`）**：纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL 握手 → `Hello` 注册 → 调 `org.freedesktop.Notifications.Notify`），不调用 `notify-send`；连接常驻复用、断开自动重连（失败冷却 30s、错误去重），标题/正文/图标/urgency 都随方法参数发出。`Hello` 是总线强制步骤：没它就连 AddMatch/信号订阅都做不了（主题跟踪正需要）。
   - 两平台共用同一条发送队列：200ms 间隔防轰炸，发送失败单次重排队，队列上限 32 条。
 - **主题与图标**：通知背景跟随系统深浅色，而图标不会被反色，所以随包带两套透明底图标（`dsh-dark.*` 白鱼 / `dsh-light.*` 黑鱼）。`lib/theme.js` 启动时读一次、之后跟踪切换事件：**Windows** 读 `HKCU\...\Themes\Personalize\SystemUsesLightTheme`（缺失退 `AppsUseLightTheme`），用 `RegNotifyChangeKeyValue` 异步事件 + 2 秒非阻塞句柄检查拿到切换通知；**Linux** 读 xdg-desktop-portal 的 `org.freedesktop.appearance/color-scheme`，订阅同接口的 `SettingChanged` 信号（portal 不可用时退环境变量启发式）。两条通道都可能不可用（策略/权限/无 portal），因此都挂一个 60 秒兜底重读；主题变化还会顺手改写 AUMID 图标，让通知中心的应用图标同步换色。
-- **点击跳转**：宿主把"点击"变成打开 `http://127.0.0.1:<端口>/dnotify/click?t=<进程令牌>&target=<目标>`——那是一个只记录目标的小落地页；已打开的 DSH 页面通过 SSE（`/dnotify/events`）立刻收到目标，再用 `/dnotify/claim` 认领（**先到先得，宿主只放行一个页面**），所以多页面并存时只切一个，切的是"你已经在用的那个页面"。
-  - **会新开一个浏览器标签页**（落地页）：这是系统打开 URL 的固有行为，浏览器也拒绝脚本关闭它，插件不做规避（1.6.1 试过"自定义协议 + 一跳转发进程"，用户判定低效，1.6.2 已移除）。
-  - **Windows**：Toast 用 `activationType="protocol"` + `launch=URL`，由系统交给浏览器打开（不需要注册 COM 激活器）；不设 URL 的 Toast 是普通通知（点击只消失）。
-  - **Linux**：带 URL 的通知声明 `default` 动作并等 `Notify` 返回的 id；点击后收到 `ActionInvoked` 信号，再用 xdg-desktop-portal 的 `OpenURI` 打开（不起子进程；portal 不可用时只记一条日志）。
-  - 目标：**会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换（与点侧栏会话行同一条链路；**子代理**会话按 ui-workspace 的规则进子代理界面，**后台任务**回到它的主会话）。**启动播报** → `page:settings-plugins`：先合成 ⌘/Ctrl+, 打开「设置」再点「内置插件」导航格；打不开设置就退回**插件面板**（`pluginNavigation.openBundle`）。没有跳转目标的通知点击只消失。
-  - 旧的 `#dsh-notify=<目标>` 形式仍兼容（手动打开、或 SSE 不可用时的退路）。
+- **点击跳转（1.6.0 起：先决策，再决定要不要开窗口）**。三态是互斥且可证明的：
+  | 情况 | 行为 |
+  | --- | --- |
+  | 配置里没有点击目标 | 不跳转（Toast 是普通通知，点了只消失） |
+  | 有目标 + 有可投递的 DSH 页面 | **只**把目标定向推给那一个页面（`/dnotify/events` + `/dnotify/claim`），**不产生任何窗口** |
+  | 有目标 + 没有 DSH 页面 | 打开 DSH 并带 `#dsh-notify=<目标>` 深链，由刚启动的页面完成跳转 |
+
+  选页规则：优先"此刻聚焦的页面"，其次"最后聚焦过且仍在线的页面"（你切去别的应用时就是它）。页面注册表按 `{pageId, seq, focused, sessionId, 连接数}` 记录，只接受更大的 `seq`（focus/blur 两个请求乱序到达也不会互相覆盖），连接数是计数而不是布尔（刷新时"新连接建立/旧连接关闭"任意先后都不会误判离线）。每一条点击都是一个带 `openId` 的独立消息，认领时校验归属（非目标页面拿到 id 也认领不了）——不存在"谁先抢到算谁"。
+  - **Windows 不再经过浏览器**：Toast 用自定义协议 `dsh-notify:<目标>`；插件启动时把 `HKCU\Software\Classes\dsh-notify` 的转发器指向本进程的 `/dnotify/activate?t=<令牌>`（端口/令牌每次启动重写一次，幂等）。转发器是一个**隐藏的 PowerShell 一跳**（`-WindowStyle Hidden`，约 0.3–0.6s，无窗口闪烁）：它只问宿主"这次该怎么处理"，只有宿主回答 `open` 时才 `Start-Process` 打开地址。所以"有页面时点通知"这条路径**一个窗口都不会开**。想关掉这个注册（例如嵌入其它宿主、或权限受限）可配 `clickProtocol: false`，此时点击退回浏览器落地页。
+  - **Linux 完全在宿主进程内**：命中 `ActionInvoked` 后直接问宿主决策，`open` 时才调 xdg-desktop-portal 的 `OpenURI`（不起子进程）。
+  - 目标语义：**会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换（与点侧栏会话行同一条链路；**子代理**会话按 ui-workspace 的规则进子代理界面，**后台任务**回到它的主会话）。**启动播报** → `page:settings-plugins`：DSH 0.2.0-rc.2 的 web 端设置快捷键是 **primary+alt+Comma**（`desktop:*` 仍是 primary+Comma），客户端先试 alt 组合、再试不带 alt 的，之后退账号菜单，最后退**插件面板**（`pluginNavigation.openBundle`）。`{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
+  - 兼容：旧字段 `url`（http/https）等价于 `{ type: 'url' }`；旧的 `#dsh-notify=<目标>` 深链与 `/dnotify/click?target=<目标>` 旧链接仍然可用（作为兜底）。
+  - **不再刷新页面**：`openSession()` 抛错（会话不在客户端目录里）时只记一条日志并放弃——旧版会写持久化选中项再 `location.reload()`，而 hash 那时已被清掉，表现就是"页面原地刷新但不跳转"。
 - **启动播报（每次启动一次）**：插件 `apply` 后等组合稳定，数一遍 `ctx.get('loader')` 里的插件行——`fiber.state` 为 ACTIVE 的算加载成功，FAILED / 没有 fiber / 等不来服务的一律算"没加载起来"并列出 `entry.options.id`；主动 `disabled` 的行不计入。数不出来（没有 loader 服务）就静默跳过。进程级标记放在 `globalThis`，热更新重复 apply 不会重播。
 - **消息缓存**：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知消费后即释放；按会话/按 id 的缓存全部**有界**（摘要 128 条、审批配对 64 条、提问时刻 32 条，超出淘汰最旧），常驻进程不会随会话数增长；**同来源同文案** 1.5 秒内只弹一次（事件重复派发或失败重投时不连弹；去重键 = 标题 + 正文 + 来源 id + 会话归属，所以两个同名后台任务、两个并行会话的同类提醒都各弹各的）；重启自动初始化。
 - **`never` 政策下的审批通知**：`approval/request` waterfall 在 `never` 政策下不会派发，因此插件改从会话日志的 `approval/asked`/`approval/decided` 审计对获取被拒记录。想收到这类通知请保持审批政策为 `never`。
