@@ -113,7 +113,13 @@ function createPage(options = {}) {
       if (selector === 'button[aria-haspopup="menu"]') return state.menuTrigger || null
       return null
     },
-    querySelectorAll: () => state.documentButtons,
+    querySelectorAll: (selector) => {
+      // 新实现用 `document.querySelectorAll('button,[role="button"],a')` 找真实设置入口
+      if (typeof selector === 'string' && /button/i.test(selector)) {
+        return options.launcher ? [options.launcher] : state.documentButtons
+      }
+      return state.documentButtons
+    },
   }
 
   const sessionsState = { byId: options.byId || {} }
@@ -397,7 +403,33 @@ test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
   assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
 })
 
-test('跳转 page:settings-plugins → 合成快捷键打开设置并点「内置插件」', async () => {
+test('跳转 page:settings-plugins → 点真实设置入口打开设置并点「内置插件」', async () => {
+  const cell = element('内置插件')
+  const modal = { querySelectorAll: () => [element('通用'), cell] }
+  const launcher = element('设置')
+  launcher.getAttribute = (name) => (name === 'aria-label' ? '设置' : null)
+  const page = createPage({
+    pluginNavigation: {},
+    launcher,
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
+  await tick()
+  page.advance(150)     // 第一轮：设置还没开 → 点真实入口
+  await tick()
+  assert.equal(launcher.clicks, 1, '应优先点侧边栏真实设置入口（最快且不碰其它菜单）')
+  assert.equal(page.state.keyboardEvents.length, 0, '入口能点就不该再合成快捷键')
+
+  page.setSettingsModal(modal)   // 设置弹窗出现了
+  page.advance(200)
+  await tick()
+  assert.equal(cell.clicks, 1, '应点开「内置插件」')
+  assert.deepEqual(page.opened, [], '设置已打开，不该再退到插件面板')
+})
+
+test('跳转 page:settings-plugins → 没有真实入口时合成快捷键（web 绑定 primary+alt）', async () => {
   const cell = element('内置插件')
   const modal = { querySelectorAll: () => [element('通用'), cell] }
   const page = createPage({
@@ -408,19 +440,19 @@ test('跳转 page:settings-plugins → 合成快捷键打开设置并点「内�
   await tick()
   page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
-  page.advance(150)     // 第一轮：设置还没开 → 合成快捷键
+  page.advance(600)     // 入口那一段走完（~500ms）才会合成快捷键
   await tick()
   const keyEvent = page.state.keyboardEvents[0]
-  assert.ok(keyEvent, '应合成一次快捷键')
+  assert.ok(keyEvent, '入口不可用时才合成快捷键')
   assert.equal(keyEvent.code, 'Comma')
   assert.equal(keyEvent.ctrlKey, true, 'Windows/Linux 用 Ctrl')
+  assert.equal(keyEvent.altKey, true, '0.2.0-rc.2 的 web 绑定是 primary+alt')
   assert.equal(keyEvent.metaKey, false)
 
-  page.setSettingsModal(modal)   // 设置弹窗出现了
+  page.setSettingsModal(modal)
   page.advance(200)
   await tick()
   assert.equal(cell.clicks, 1, '应点开「内置插件」')
-  assert.deepEqual(page.opened, [], '设置已打开，不该再退到插件面板')
 })
 
 test('跳转 page:settings-plugins：设置打不开就退回插件面板', async () => {
