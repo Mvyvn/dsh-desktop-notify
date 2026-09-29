@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0] - 2026-09-30
+
+**点击跳转重做为"先决策、再决定要不要开窗口"**（三态互斥且可证明：无目标不跳转 / 有页面只让该页面跳转 / 无页面才新开 DSH）。为此引入 TypeScript 6 类型化核心与配套状态机。
+
+- **点击目标改为显式四态**（`click`）：`none`（不传即此项）/ `session` / `page` / `url`。`sessionId` 只用于聚焦门控，不再隐式生成跳转链接——旧版"留空"根本表达不出"不要跳转"。旧字段 `url`（http/https）仍兼容。
+- **每条点击有身份**：`openId` 精确认领 + **归属校验**（非目标页面拿到 id 也认领不了），删除"广播后谁先 claim 谁赢"。
+- **页面注册表**（`src/pages.ts`）：`{pageId, seq, focused, sessionId, 连接数}`；只接受更大的 `seq`（focus/blur 乱序不覆盖新状态，失焦清除"当前聚焦"但保留"最后用过"）；连接数用计数而非布尔（刷新时新旧连接任意先后都不会误判离线）。选页：此刻聚焦 → 最后聚焦且在线 → 都没有就新开。
+- **Windows 不再经过浏览器**：Toast 用 `dsh-notify:` 自定义协议，插件启动时把 `HKCU\Software\Classes\dsh-notify` 指向本进程的 `/dnotify/activate`；隐藏 PowerShell 一跳只负责"问宿主该怎么做"，只有宿主回答 `open` 才真正打开地址 → **有页面时点击零新窗口**。可配 `clickProtocol: false` 关掉。
+- **Linux 在宿主进程内决策**：`ActionInvoked` → 宿主决策 → 需要时才调 portal `OpenURI`。
+- **删除 `location.reload()` 兜底**：`openSession()` 抛错时明确失败并记日志，不再"原地刷新但不跳转"（旧版 reload 前 hash 已被清掉）。
+- **新端点** `GET /dnotify/activate?raw=<目标>`：返回 `{action:'delivered'|'open'|'ignore', url?}`，由平台侧执行唯一需要开窗口的动作。
+- **DSH 兼容**：声明 `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.2 <0.3.0" }`（`peerDependenciesMeta.optional` 挡住 npm 自动安装整棵 DSH 依赖树；DSH 自己的兼容性预检只看 `peerDependencies`）。已实测 DSH **0.2.0-rc.2**：核心服务包（connection / webserver / jobs / subagent / scope / loader / cordis）两版之间零改动；适配其 web 端设置快捷键改为 **primary+alt+Comma**。
+- **TypeScript 6 基线**：`src/**/*.ts`（strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` + `erasableSyntaxOnly`，TS7 就绪）编译到 `lib/`；`npm run build`，`npm test` 自动先构建。迁移进度见 `docs/migration-ts6-ts7.md`。
+- 测试：141 项全绿（新增协议、注册表、激活决策、三态点击、归属校验、seq 乱序、激活端点等用例；真机验证含"有已打开页面 → 页面内跳转且零新窗口"）。
+
 ## [1.5.4] - 2026-09-25
 
 - **修复点击跳转的三处结构性问题**（都表现为"偶发点了没反应 / 跳错页面"）：
