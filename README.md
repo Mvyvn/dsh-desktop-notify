@@ -62,9 +62,12 @@ node --input-type=module -e "import('./lib/toast-linux.js').then(m => m.sendToas
 | ✅ 任务完成 | `agent/status` running→idle（仅根 agent，3 秒去抖） | 该 agent 的会话 | 工作区/会话名:结尾输出内容 |
 | ❓ 等待你回答 | `tools/execute` 捕获 `ask_user_question` 派发 | 发起提问的会话 | 工作区/会话名:[类型] 内容 |
 | 🚫 审批被自动拒绝 | `session/event` 流 `approval/asked`+`decided` 审计对 | 被拒操作所在会话 | 工作区/会话名:工具名-拒绝原因 |
-| 🤖 后台子代理结束 | `subagent/end` | 主会话或子会话 | 工作区/主会话名:子代理名已完成 |
+| 🤖 后台子代理结束 | `subagent/end` | 母会话或子会话 | 工作区/**母会话**名:子代理名已完成 |
 | 🎯 目标完成 / 阻塞 | `goal/changed` | 目标所属会话 | 工作区/会话名:目标-已完成 / 目标-阻塞原因 |
-| 🧰 后台任务结束 | `jobs.events` 的 `settled` 事件（0.1.7 起 `onJobDone` 已移除；`kind='subagent'` 的 job 由上一行负责，不重复弹） | owner 会话（取不到则不静默） | 工作区/会话名:后台任务名已完成/失败/被终止 |
+| 🧰 后台任务结束 | `jobs.events` 的 `settled` 事件（0.1.7 起 `onJobDone` 已移除；`kind='subagent'` 的 job 由上一行负责，不重复弹） | owner 的**母会话**（取不到则不静默） | 工作区/母会话名:后台任务名已完成/失败/被终止 |
+| 🕒 团队任务待处理 / ✅ 团队任务已完成 | `session/event` 的 `team/task`（只对**状态变化**发；`in_progress`/`deleted` 不打扰） | 任务 owner 的母会话 | 工作区/会话名:任务标题 |
+| 🗜️ 上下文已智能压缩 | `session/event` 的 `compaction/end`（带 `error` 的失败压缩不报） | 该会话 | 工作区/会话名:上下文已智能压缩 |
+| ⏰ 定时任务已启动 | `session/event` 的 `schedule/change`（`operation='create'`；`delete`/dispatch 不打扰） | 该会话 | 工作区/会话名:定时任务标题 |
 | 🚀 启动播报 | 插件 `apply` 后等组合稳定（`loader.await()`）数一遍插件行 | 无（始终推送） | 插件启动成功:共有 N 个插件成功加载 / 有 N 个插件启动失败:加载失败的插件为 a、b |
 
 前缀的"工作区"按会话动态解析（多工作区并行时各显示自己的工作区名），"会话名"取 `sessionTitle` 服务。门控只比对会话，不影响文案。
@@ -165,7 +168,7 @@ dsh-desktop-notify/
   选页规则：优先"此刻聚焦的页面"，其次"最后聚焦过且仍在线的页面"（你切去别的应用时就是它）。页面注册表按 `{pageId, seq, focused, sessionId, 连接数}` 记录，只接受更大的 `seq`（focus/blur 两个请求乱序到达也不会互相覆盖），连接数是计数而不是布尔（刷新时"新连接建立/旧连接关闭"任意先后都不会误判离线）。每一条点击都是一个带 `openId` 的独立消息，认领时校验归属（非目标页面拿到 id 也认领不了）——不存在"谁先抢到算谁"。
   - **Windows 不再经过浏览器**：Toast 用自定义协议 `dsh-notify:<目标>`；插件启动时把 `HKCU\Software\Classes\dsh-notify` 的转发器指向本进程的 `/dnotify/activate?t=<令牌>`（端口/令牌每次启动重写一次，幂等）。转发器是一个**隐藏的 PowerShell 一跳**（`-WindowStyle Hidden`，约 0.3–0.6s，无窗口闪烁）：它只问宿主"这次该怎么处理"，只有宿主回答 `open` 时才 `Start-Process` 打开地址。所以"有页面时点通知"这条路径**一个窗口都不会开**。投递成功（`delivered`）时它还会**把浏览器窗口带到前台**——否则页面确实跳了，你看到的却是"点了没反应"（`config.focusWindow: false` 关掉这个前台激活；`config.clickProtocol: false` 整个关掉协议注册，点击退回浏览器落地页）。页面侧也会再 `window.focus()` 试一次（浏览器可能忽略，忽略无害）。
   - **Linux 完全在宿主进程内**：命中 `ActionInvoked` 后直接问宿主决策，`open` 时才调 xdg-desktop-portal 的 `OpenURI`（不起子进程）。
-  - 目标语义：**会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换（与点侧栏会话行同一条链路；**子代理**会话按 ui-workspace 的规则进子代理界面，**后台任务**回到它的主会话）。**启动播报** → `page:settings-plugins`：DSH 0.2.0-rc.2 的 web 端设置快捷键是 **primary+alt+Comma**（`desktop:*` 仍是 primary+Comma），客户端先试 alt 组合、再试不带 alt 的，之后退账号菜单，最后退**插件面板**（`pluginNavigation.openBundle`）。`{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
+  - 目标语义：**会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换（与点侧栏会话行同一条链路）。**子代理与后台任务一律指向母会话**：宿主沿 `header.parentSession` 一路回溯到顶层会话（多层子代理不再停在中间层——那个 id 客户端目录里往往解析不到，表现就是"点了不跳"），子代理自己的名字写在正文里。**启动播报** → `page:settings-plugins`：客户端先点侧边栏的**真实设置入口**（`aria-label="设置"`，几十毫秒），不可用时才合成快捷键（0.2.0-rc.2 的 web 绑定是 **primary+alt+Comma**，desktop 是 primary+Comma），再退"确认有设置才点、否则 Esc 关掉"的菜单路径，最后退**插件面板**（`pluginNavigation.openBundle`）——全程 ~2s 内收敛，且不会在屏幕上留下多余菜单。`{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
   - 兼容：旧字段 `url`（http/https）等价于 `{ type: 'url' }`；旧的 `#dsh-notify=<目标>` 深链与 `/dnotify/click?target=<目标>` 旧链接仍然可用（作为兜底）。
   - **不再刷新页面**：`openSession()` 抛错（会话不在客户端目录里）时只记一条日志并放弃——旧版会写持久化选中项再 `location.reload()`，而 hash 那时已被清掉，表现就是"页面原地刷新但不跳转"。
 - **启动播报（每次启动一次）**：插件 `apply` 后等组合稳定，数一遍 `ctx.get('loader')` 里的插件行——`fiber.state` 为 ACTIVE 的算加载成功，FAILED / 没有 fiber / 等不来服务的一律算"没加载起来"并列出 `entry.options.id`；主动 `disabled` 的行不计入。数不出来（没有 loader 服务）就静默跳过。进程级标记放在 `globalThis`，热更新重复 apply 不会重播。
