@@ -169,10 +169,15 @@ function harness(options = {}) {
       res.headersSent = true
     }
     res.write = (chunk) => { res.chunks.push(String(chunk)); return true }
+    // 处理器可能是异步的（例如 /click 与 /activate 会**等页面认领**）：这里必须等到
+    // res.end() 真正被调用，否则测试会拿到 status=0 的"未完成"响应。
+    let finished = false
+    const done = new Promise((resolve) => { res.once('__end', () => { finished = true; resolve() }) })
     res.end = (chunk) => {
       if (chunk !== undefined) res.chunks.push(String(chunk))
       if (!res.headersSent) { res.status = 200; res.headersSent = true }
       res.body = res.chunks.join('')
+      res.emit('__end')
       return res
     }
     route.handler(req, res)
@@ -182,7 +187,20 @@ function harness(options = {}) {
     } else {
       process.nextTick(() => { req.emit('end') })
     }
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    // SSE（/dnotify/events）是流式响应，永远不会 res.end()：一旦响应头表明是
+    // text/event-stream 就立即返回；其它端点等到 res.end() 真正被调用（处理器可能是
+    // 异步的，例如 /click 与 /activate 会**等页面认领**）。
+    const isStream = () => res.headersSent && /text\/event-stream/i.test(String(res.headers['content-type'] || ''))
+    const deadline = Date.now() + (options.timeoutMs || 4000)
+    while (!isStream()) {
+      const settled = await Promise.race([
+        done.then(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), Math.min(20, Math.max(1, deadline - Date.now())))),
+      ])
+      if (settled) break
+      if (Date.now() >= deadline) break
+    }
+    void finished
     return { status: res.status, body: res.body || res.chunks.join(''), headers: res.headers, res }
   }
   return {
@@ -311,6 +329,19 @@ test('路由的信任栅栏：connection.admit 拒绝时返回 401/403，不处�
   assert.equal(ok.status, 200)
 })
 
+/**
+ * 模拟真实客户端：发起点击（可能 302/落地页）的同时，认领它推过来的那条消息。
+ * 宿主现在会**等认领**：等不到就退化成"新开 DSH"，所以测试必须像客户端一样认领。
+ */
+async function clickAndClaim(h, url, stream, pageId) {
+  const pending = h.request({ method: 'GET', url })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const openId = envelopeIds(stream).pop()
+  const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId, openId } })
+  const click = await pending
+  return { click, openId, claim: JSON.parse(claim.body) }
+}
+
 /** 从 SSE 流里取出所有 navigate 事件的 openId（按出现顺序）。 */
 function envelopeIds(stream) {
   return [...String(stream.res.chunks.join('')).matchAll(/event: navigate\ndata: (\{.*?\})\n\n/g)]
@@ -338,12 +369,11 @@ test('点击三态②：有可投递页面 → 只推给那个页面，且不产
   const tabB = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   // 两个页面都开着，用户最后在 A 上操作
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const { click, claim } = await clickAndClaim(h, `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}`, tabA, 'pA')
   assert.equal(click.status, 200, '有页面时走落地页，不 302')
+  assert.equal(claim.target, 'session:s1')
   assert.match(tabA.res.chunks.join(''), /event: navigate/, '聚焦的页面应收到')
   assert.ok(!/event: navigate/.test(tabB.res.chunks.join('')), '其它页面收不到（不广播、不靠抢）')
-  const openId = envelopeId(tabA)
-  assert.equal(JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'pA', openId } })).body).target, 'session:s1')
 })
 
 test('点击三态③：没有可投递页面 → 302 到 DSH 深链（由浏览器拉起 DSH）', async () => {
@@ -381,9 +411,9 @@ test('点击落地页：跨站触发被拒（403），旧令牌仍放行（用�
   assert.equal(crossSite.body, 'forbidden')
 
   // 旧令牌（上一次运行发出的通知）：按用户导航放行（有一个可投递页面 → 正常投递）
-  await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const stale = await h.request({ method: 'GET', url: '/dnotify/click?t=stale-token&raw=session%3As9' })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  const { click: stale } = await clickAndClaim(h, '/dnotify/click?t=stale-token&raw=session%3As9', stream, 'p1')
   assert.equal(stale.status, 200, '不该回 forbidden')
   assert.match(stale.body, /已通知 DSH 切换/)
 })
@@ -414,17 +444,21 @@ test('点击投递：每次点击有唯一 openId，连点两条不会串单', a
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
   const ids = []
+  const claims = []
   for (const target of ['session:s1', 'session:s2']) {
-    const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent(target)}` })
-    assert.equal(click.status, 200)
-    ids.push(envelopeIds(stream).pop())
+    // 像真实客户端：点击请求会等认领，所以先并发发起，再认领，最后收结果
+    const pending = h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent(target)}` })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const openId = envelopeIds(stream).pop()
+    ids.push(openId)
+    assert.ok(openId, '每次点击都要推出一条带 openId 的消息')
+    claims.push(JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId } })).body))
+    assert.equal((await pending).status, 200, '认领成功后走落地页')
   }
   assert.equal(ids.length, 2)
   assert.notEqual(ids[0], ids[1], '两次点击必须是两条不同身份的消息')
-  const claimA = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: ids[0] } })).body)
-  const claimB = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: ids[1] } })).body)
-  assert.equal(claimA.target, 'session:s1')
-  assert.equal(claimB.target, 'session:s2')
+  assert.equal(claims[0].target, 'session:s1', 'A 的认领只能拿到 A')
+  assert.equal(claims[1].target, 'session:s2', 'B 的认领只能拿到 B')
   const again = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: ids[0] } })).body)
   assert.deepEqual(again, { ok: false, reason: 'stale' })
 })
@@ -434,12 +468,14 @@ test('归属校验：非目标页面即使拿到 openId 也不能认领', async 
   const tabA = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pA' })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const pendingClick = h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  await new Promise((resolve) => setTimeout(resolve, 10))
   const openId = envelopeId(tabA)
   const stolen = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'pB', openId } })).body)
   assert.deepEqual(stolen, { ok: false, reason: 'not-owner' })
   const owner = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'pA', openId } })).body)
   assert.equal(owner.ok, true)
+  assert.equal((await pendingClick).status, 200, '拥有者认领后点击才算成功投递')
 })
 
 test('页面注册表：失焦后仍投给"最后用过"的页面（用户此刻在别的应用里）', async () => {
@@ -473,7 +509,7 @@ test('SSE：连接的页面立刻拿到该投给自己的跳转，未知端点 4
   assert.match(String(stream.headers['content-type']), /text\/event-stream/)
   assert.match(stream.res.chunks.join(''), /retry: 2000/)
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('page:plugins')}` })
+  const { click } = await clickAndClaim(h, `/dnotify/click?t=x&raw=${encodeURIComponent('page:plugins')}`, stream, 'p1')
   assert.equal(click.status, 200)
   assert.match(stream.res.chunks.join(''), /event: navigate/)
   assert.match(stream.res.chunks.join(''), /page:plugins/)
@@ -490,7 +526,11 @@ test('激活端点：无页面时回 open（交给系统打开），有页面时
   // 有页面并聚焦：投递，**不给调用方任何要打开的地址**
   const tab = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const delivered = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })).body)
+  // 页面像真实客户端那样认领 → 宿主才回 delivered
+  const pendingActivate = h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: envelopeIds(tab).pop() } })
+  const delivered = JSON.parse((await pendingActivate).body)
   assert.deepEqual(delivered, { action: 'delivered', pageId: 'p1' })
   assert.match(tab.res.chunks.join(''), /event: navigate/)
   // 目标为空：ignore
@@ -499,6 +539,39 @@ test('激活端点：无页面时回 open（交给系统打开），有页面时
   // url 目标：交给外部打开
   const external = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=' + encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx') })).body)
   assert.deepEqual(external, { action: 'open', url: 'https://example.com/x' })
+})
+
+test('投递后没人认领 → 不静默失败，改成新开深链', async () => {
+  const h = await start({ roots: [ROOT_AGENT], config: { claimWaitMs: 60 } })
+  const tab = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
+  // 页面"连着但卡住"（比如旧客户端、冻结的标签页）：只投递、不认领
+  const activate = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })).body)
+  assert.equal(activate.action, 'open', '不能把"写进 socket"当成"已经跳了"')
+  assert.match(String(activate.url), /#dsh-notify=session%3As1$/)
+  assert.equal(activate.reason, 'unclaimed')
+  assert.match(tab.res.chunks.join(''), /event: navigate/, '消息仍然推给了页面（它自己慢一步也没关系）')
+  // 浏览器落地页同理：没认领就 302，而不是显示"已通知 DSH 切换"
+  const click = await h.request({ method: 'GET', url: '/dnotify/click?t=x&raw=session%3As1' })
+  assert.equal(click.status, 302)
+})
+
+test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  // 令牌从一条**可点击**通知的弹出描述里取（与真实排查方式一致）
+  h.services.desktopNotify.pushAlways({ title: '取令牌', click: { type: 'session', sessionId: 's1' } })
+  h.advance(500)
+  const denied = await h.request({ method: 'GET', url: '/dnotify/status' })
+  assert.equal(denied.status, 403)
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 3, pageId: 'p1', sessionId: 's1' } })
+  const ok = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${h.clickToken()}` })).body)
+  assert.equal(ok.pages.length, 1)
+  assert.equal(ok.pages[0].pageId, 'p1')
+  assert.equal(ok.pages[0].focused, true)
+  assert.deepEqual(ok.streams, ['p1'])
+  assert.equal(ok.lastActivate, null)
+  assert.ok(stream)
 })
 
 test('SSE：流断开后不再推送，也不会因为心跳而报错', async () => {

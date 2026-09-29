@@ -164,6 +164,11 @@ export class PageRegistry {
     this.#pages.clear()
     this.#lastFocusedPageId = ''
   }
+
+  /** 全部页面的快照（`/dnotify/status` 诊断端点用）。 */
+  snapshot(): PageSnapshot[] {
+    return [...this.#pages.values()].map(snapshotOf)
+  }
 }
 
 function snapshotOf(record: PageRecord): PageSnapshot {
