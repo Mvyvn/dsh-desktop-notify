@@ -19,3 +19,6 @@ desktop.ini
 .vscode/
 .idea/
 *.local
+
+# 本地工具产物（OMB 认知层的记忆库：session.db / README.md），不进仓库
+.omb/
