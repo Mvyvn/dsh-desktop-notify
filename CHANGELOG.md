@@ -2,6 +2,8 @@
 
 ## [1.7.0] - 2026-09-30
 
+- **全量迁移到 TypeScript 6**：原先手写的 9 个模块（宿主 `index`、浏览器半区 `client`、`dbus`、`winrt`、`toast-linux`、`theme*`、`win32-registry`）全部变成 `src/*.ts`，`lib/*.js` 一律是构建产物。三个 tsconfig：核心层 strict（协议/页面/激活/门控/API/状态/图标/文本）、平台层先关 strict 再逐模块收紧、浏览器半区按**脚本**编译（`moduleDetection: "legacy"`，不产生 `export {}`）。`npm run build` 依次跑三个配置；`npm test` 自动先构建。行为不变：149 项单测 + `dsh-runtime-probe`（真 cordis）+ `theme-probe`（真注册表）全通过，忽略空白后的产物差异只剩缩进/分号这类格式。
+
 - **新增三类通知**（DSH 0.2.0-rc.2 的事件面）：
   - 🕒 **团队任务待处理 / ✅ 团队任务已完成** —— `session/event` 的 `team/task`，只对**状态变化**发（`in_progress`/`deleted` 不打扰，同一状态重复派发也只弹一次）；
   - 🗜️ **上下文已智能压缩** —— `session/event` 的 `compaction/end`，带 `error` 的失败压缩不报；
