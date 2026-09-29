@@ -429,6 +429,74 @@ test('点击令牌在同一进程内跨 apply 复用（热更新不会让已发�
   assert.equal(second.clickToken(), first.clickToken(), '同一进程内两次 apply 的令牌必须一致')
 })
 
+test('多层子代理：一路回溯到母会话（点击目标与前缀都用顶层会话）', async () => {
+  const root = { id: 'root-1', title: '母会话', header: { cwd: 'D:\\ws\\proj' } }
+  const sub1 = { id: 'sub-1', title: '子代理甲', header: { parentSession: 'root-1', origin: 'subagent', cwd: 'D:\\ws\\proj' } }
+  const sub2 = { id: 'sub-2', title: '子代理乙', header: { parentSession: 'sub-1', origin: 'subagent', cwd: 'D:\\ws\\proj' } }
+  const h = await start({ roots: [ROOT_AGENT], sessions: { 'root-1': root, 'sub-1': sub1, 'sub-2': sub2 } })
+  h.emit('subagent/end', { id: 'sub-2', runId: 'run-2' })
+  h.advance(500)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].click.wire, 'session:root-1', '多层子代理必须回到母会话，而不是停在中间层')
+  assert.match(h.sent[0].message, /母会话/, '前缀用母会话名')
+  assert.ok(!/子代理甲/.test(h.sent[0].message), '不该把中间层当母会话')
+})
+
+test('团队任务：pending/completed 各弹一次，重复同状态不再打扰', async () => {
+  const root = { id: 'root-1', title: '母会话', header: { cwd: 'D:\\ws\\proj' } }
+  const h = await start({ roots: [ROOT_AGENT], sessions: { 'root-1': root } })
+  const emitTask = (status) => h.emit('session/event', root, {
+    type: 'team/task',
+    data: { version: 2, teamId: 't1', task: { id: 'task-1', revision: 1, subject: '实现登录页', status, ownerId: 'root-1' } },
+  })
+  emitTask('pending')
+  h.advance(400)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].title, '🕒 团队任务待处理')
+  assert.match(h.sent[0].message, /实现登录页/)
+  assert.equal(h.sent[0].click.wire, 'session:root-1', '点击回到母会话')
+  emitTask('pending')            // 同一状态重复派发
+  h.advance(400)
+  assert.equal(h.sent.length, 1, '状态没变就不该再弹')
+  emitTask('in_progress')        // 中间状态不打扰
+  h.advance(400)
+  assert.equal(h.sent.length, 1)
+  emitTask('completed')
+  h.advance(400)
+  assert.equal(h.sent.length, 2)
+  assert.equal(h.sent[1].title, '✅ 团队任务已完成')
+})
+
+test('上下文压缩：compaction/end 无 error 才通知', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  h.emit('session/event', ROOT_AGENT.session, { type: 'compaction/start', data: { compactionId: 'c1', turn: 1 } })
+  h.advance(400)
+  assert.equal(h.sent.length, 0, '开始压缩不打扰')
+  h.emit('session/event', ROOT_AGENT.session, { type: 'compaction/end', data: { compactionId: 'c1', turn: 1 } })
+  h.advance(400)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].title, '🗜️ 上下文已智能压缩')
+  assert.match(h.sent[0].message, /上下文已智能压缩/)
+  assert.equal(h.sent[0].click.wire, 'session:s1')
+  h.emit('session/event', ROOT_AGENT.session, { type: 'compaction/end', data: { compactionId: 'c2', turn: 2, error: 'boom' } })
+  h.advance(400)
+  assert.equal(h.sent.length, 1, '压缩失败不该报"已智能压缩"')
+})
+
+test('定时任务：create 才通知（delete/dispatch 不打扰）', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  h.emit('session/event', ROOT_AGENT.session, { type: 'schedule/change', data: { version: 1, operation: 'delete', id: 'sched-9' } })
+  h.advance(400)
+  assert.equal(h.sent.length, 0)
+  h.emit('session/event', ROOT_AGENT.session, { type: 'schedule/change',
+    data: { version: 1, operation: 'create', schedule: { id: 'sched-1', title: '每天早上跑测试' } } })
+  h.advance(400)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].title, '⏰ 定时任务已启动')
+  assert.match(h.sent[0].message, /每天早上跑测试/)
+  assert.equal(h.sent[0].click.wire, 'session:s1')
+})
+
 test('launch 默认走浏览器落地页（实测协议激活在未打包宿主上不触发），可显式改回协议', async () => {
   // 默认：launch 是 http 落地页 —— 浏览器必然打开它，因此点击一定能到达宿主
   const byDefault = await start({ roots: [ROOT_AGENT] })
