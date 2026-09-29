@@ -1,0 +1,13 @@
+{
+  // 浏览器半区（lib/client.js）单独编译：
+  //   · 它由 DSH 的客户端打包器加载，本身是"脚本式"的 IIFE（window.__ModuleLoader__.load(...)），
+  //     没有任何 import/export。若被当成 ES 模块，TS 会在尾部补一句 `export {};` 标记模块性，
+  //     那会破坏以脚本方式求值它的环境（例如本仓库的单测骨架）。
+  //   · `moduleDetection: "legacy"` 正是"没有 import/export 就当脚本"的旧语义：产物是一段纯脚本，
+  //     且不依赖会在 TS7 移除的 node10 解析（module/moduleResolution 继续继承 nodenext）。
+  "extends": "./tsconfig.platform.json",
+  "compilerOptions": {
+    "moduleDetection": "legacy"
+  },
+  "include": ["src/client.ts"]
+}

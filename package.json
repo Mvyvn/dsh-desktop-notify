@@ -15,7 +15,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.platform.json && tsc -p tsconfig.client.json",
     "check": "node scripts/check-syntax.mjs",
     "pretest": "npm run build",
     "test": "node scripts/run-tests.mjs"

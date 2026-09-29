@@ -41,5 +41,20 @@
     "removeComments": false,
     "newLine": "lf"
   },
-  "include": ["src/**/*.ts"]
+  // 严格档只覆盖"核心层"：协议 / 页面注册表 / 激活决策 / 门控 / API / 状态 / 文本 / 图标。
+  // 平台与粘合层（WinRT、D-Bus、注册表、主题、宿主 index 与浏览器半区 client）走
+  // tsconfig.platform.json：先完成语言迁移、再逐模块收紧（见 docs/migration-ts6-ts7.md）。
+  "include": [
+    "src/protocol.ts",
+    "src/pages.ts",
+    "src/activation.ts",
+    "src/gate.ts",
+    "src/api.ts",
+    "src/notify.ts",
+    "src/text.ts",
+    "src/state.ts",
+    "src/icons.ts",
+    "src/theme-codec.ts",
+    "src/toast-xml.ts"
+  ]
 }

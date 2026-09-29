@@ -1,0 +1,33 @@
+{
+  // 平台/粘合层的编译配置：同样是 TypeScript 6，但**先关掉 strict**。
+  //
+  // 为什么分两档（见 docs/migration-ts6-ts7.md）：
+  //   · 核心层（协议 / 页面注册表 / 激活决策 / 门控 / API / 状态容器）已经 strict 通过，
+  //     那一层才是"非法状态写不出来"真正有价值的地方；
+  //   · 平台层是 koffi(WinRT) / 手写 D-Bus 编组 / 注册表 / DOM 粘合，边界上大量
+  //     `any` 语义（指针、变体、HRESULT）。一次性 strict 化会写出一堆只增加噪音的断言，
+  //     所以先完成**语言迁移**（.ts + 类型可见），严格度按模块逐步收紧。
+  //
+  // `erasableSyntaxOnly` 仍然打开：不允许 enum/namespace/参数属性等会改变运行时的语法，
+  // 与 TS7 的类型擦除方向一致。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": false,
+    "noImplicitAny": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "exactOptionalPropertyTypes": false,
+    "noUncheckedIndexedAccess": false,
+    "lib": ["es2023", "dom"]
+  },
+  "include": [
+    "src/theme.ts",
+    "src/theme-win32.ts",
+    "src/theme-linux.ts",
+    "src/win32-registry.ts",
+    "src/dbus.ts",
+    "src/winrt.ts",
+    "src/toast-linux.ts",
+    "src/index.ts"
+  ]
+}

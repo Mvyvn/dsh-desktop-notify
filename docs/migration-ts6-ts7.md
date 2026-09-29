@@ -31,7 +31,20 @@
 对应测试：`tests/protocol.test.mjs`、`tests/activation.test.mjs`（注册表 + 决策），宿主路由行为在
 `tests/host.test.mjs` 里按三态逐条锁住。
 
-## 待迁移（第二阶段：平台后端）
+## 已完成（第二阶段：平台后端 + 宿主与浏览器半区）
+
+全部 20 个模块都在 `src/`：`protocol / pages / activation / gate / api / notify / text / state / icons / theme-codec /
+ toast-xml`（核心层，`tsconfig.json`，**strict**）＋ `theme / theme-win32 / theme-linux / win32-registry / dbus /
+ winrt / toast-linux / index`（`tsconfig.platform.json`，先关 strict、逐步收紧）＋ `client`（`tsconfig.client.json`，
+ `moduleDetection: "legacy"` 按脚本编译，避免 TS 在尾巴上加 `export {}` 破坏脚本式加载）。
+
+`npm run build` 依次跑这三个配置；产物落在 `lib/`（提交进仓库，DSH 不做编译）。
+验证：迁移前后 `git diff --ignore-all-space lib/` 只有缩进/分号/`"use strict"` 这类格式差异，行为由 149 项单测 +
+ `dsh-runtime-probe`（真 cordis）+ `theme-probe`（真注册表）共同锁定。
+
+## 待迁移（遗留）：平台层的严格化
+
+下面是旧文档里"第二阶段"的原始描述，保留作为平台层继续收紧时的接口草图：
 
 `lib/winrt.js`（koffi 直调 WinRT）、`lib/dbus.js`（手写 D-Bus 编解码）、`lib/theme*.js`、
 `lib/win32-registry.js` —— 这些是"平台适配"层，最值得先抽成接口：
