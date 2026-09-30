@@ -490,7 +490,11 @@
             navigator.serviceWorker.addEventListener('controllerchange', function () { announceToServiceWorker(reg) })
             try { navigator.serviceWorker.ready.then(function () { announceToServiceWorker(reg) }) } catch (e) { /* ignore */ }
             // SW 冷启动/被回收后映射会丢：周期性重报
-            setInterval(function () { announceToServiceWorker(reg) }, 30000)
+            setInterval(function () {
+              announceToServiceWorker(reg)
+              // 顺带把权限变化告诉宿主（用户手动改过站点权限时也能收敛）
+              reportSw({ kind: 'permission', state: notifyPermission(), pageId: getPageId() })
+            }, 30000)
             reportSw({ kind: 'register', pageId: getPageId(), permission: notifyPermission() })
             if (notifyPermission() !== 'granted') showPermissionBanner()
           })
@@ -641,6 +645,9 @@
           seq: nextSeq(),
           // 当前选中的会话（取不到就是 null：宿主对"归属不明"的通知照常推送）
           sessionId: readSessionId(),
+          // 通知权限一起带上：用户可能在站点设置里手动允许过（不经过我们的申请流程），
+          // 而宿主的分流要靠它决定走浏览器通知还是降级到原生 Toast。
+          permission: notifyPermission(),
         }, keepalive).catch(function () {})
       } catch (e) { /* ignore */ }
     }

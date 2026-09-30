@@ -695,6 +695,15 @@ test('混合 backend 分流：页面在线且权限 granted → 浏览器通知�
   assert.equal(h.sent.length, 1, '有权限时不再发原生 Toast')
   assert.match(stream.res.chunks.join(''), /event: notify/, '内容通过 notify 事件交给页面（页面再交给 SW 显示）')
   assert.match(stream.res.chunks.join(''), /session:s1/, '点击目标要随通知一起带过去')
+
+  // ③ 权限可能是**另一个标签页**手动允许的（不经过我们的申请流程）：只要任一在线页面是
+  //    granted，就该走浏览器通知 —— 之前只看"投递页面"的权限，于是误判成 unknown 走了降级。
+  const stream2 = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p2' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p2', sessionId: 's1', permission: 'granted' } })
+  h.services.desktopNotify.pushAlways({ title: '第三条', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  assert.equal(h.sent.length, 1, '任一在线页面 granted 就不该再降级')
+  assert.match(stream2.res.chunks.join(''), /event: notify/, '通知应交给有权限的那个页面')
 })
 
 test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', async () => {
