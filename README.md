@@ -72,6 +72,8 @@
 
 ## 给其它插件调用（对外 API）
 
+**基线协议版本：`1.0.0`**（`NOTIFY_API_VERSION`）。兼容约定：载荷里的**未知字段一律忽略**（新增可选字段不破坏老调用方）；可带 `v: '1.0.0'` 声明版本，**更高的主版本**不会中断推送，但结果里会回带 `unsupportedVersion: true`；结果对象**只增不改**；用 `capabilities` 探测能力（`push` / `pushAlways` / `notify` / `click.session` / `click.page` / `click.url` / `click.legacy-url` / `web-notification` / `dialog.four-state`），不要靠版本号猜。
+
 本插件把自己注册成 Cordis 服务 `desktopNotify`，**你自己的插件可以直接调用它推送通知**：
 
 ```js
@@ -221,7 +223,8 @@ dsh-desktop-notify/
 - **`never` 政策下的审批通知**：`approval/request` waterfall 在 `never` 政策下不会派发，因此插件改从会话日志的 `approval/asked`/`approval/decided` 审计对获取被拒记录。想收到这类通知请保持审批政策为 `never`。
 - **依赖系统桌面通知后端**：Windows Toast 由 WinRT 提供，Linux 由桌面会话的 D-Bus 通知服务提供；Windows **专注助手/勿扰模式**、Linux 的勿扰开关、以及浏览器层面的"静默通知"都可能吞掉通知（这类抑制无法被程序感知——`showNotification()` 依然会"成功"）。
 - **平台**：Windows 已实测（Windows 11 + Firefox）；Linux 走 D-Bus（Kubuntu/KDE、Ubuntu/GNOME 等桌面会话；无桌面会话的纯 SSH 环境不会弹通知），D-Bus 编组有单测覆盖；macOS 后端暂未实现（会加载但只记录一条"无后端"提示）。
-- **调试日志开关**：默认关闭，终端不输出 `[dsh-desktop-notify]` **状态**日志。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire/job settled/schedule/SW 回报等状态日志。**错误**日志不受开关限制。除了日志，`/dnotify/status` 的诊断字段（见上）更适合事后核对。
+- **调试日志**：默认关闭。开启方式是在 profile 的 `cordis.patch.yml` 里覆盖 `desktop-notify` 行（`config: { debug: true }`）；开启后状态日志**写入文件而不是刷终端**：
+  `$DSH_HOME/logs/dsh-desktop-notify/dsh-desktop-notify.log`（超过 1MB 轮转，保留 5 份；`$DSH_HOME` 默认 `~/.dsh`）。同一个文件也会接住本插件 fiber 上的 cordis 日志（走官方 `ctx.logger.exporter()`）。**错误**日志不受开关限制，仍然直接打到终端。除了日志，`/dnotify/status` 的诊断字段（见上）更适合事后核对。
 
 ## 许可证
 

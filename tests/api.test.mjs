@@ -93,15 +93,15 @@ test('pushAlways 绕过门控直接入队', () => {
 test('notify 返回结构化结果：入队/静默/无效载荷', () => {
   const ok = harness()
   assert.deepEqual(ok.api.notify({ title: '正常', sessionId: 's1' }),
-    { ok: true, queued: true, silenced: false, reason: '' })
+    { ok: true, queued: true, silenced: false, reason: '', apiVersion: '1.0.0', unsupportedVersion: false })
 
   const silenced = harness({ queued: false, silenced: true, reason: 'silenced' })
   assert.deepEqual(silenced.api.notify({ title: '静默', sessionId: 's1' }),
-    { ok: true, queued: false, silenced: true, reason: 'silenced' })
+    { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.0.0', unsupportedVersion: false })
 
   const dup = harness({ queued: false, silenced: false, reason: 'duplicate' })
   assert.deepEqual(dup.api.notify({ title: '重复' }),
-    { ok: true, queued: false, silenced: false, reason: 'duplicate' })
+    { ok: true, queued: false, silenced: false, reason: 'duplicate', apiVersion: '1.0.0', unsupportedVersion: false })
 })
 
 test('标题为空或缺失时不推送', () => {
@@ -139,4 +139,14 @@ test('缺省 message 归一为空串而不是 undefined', () => {
   const { api, queued } = harness()
   api.pushAlways({ title: '只有标题' })
   assert.deepEqual(queued, [{ title: '只有标题', message: '', urgency: 'normal', click: { type: 'none' } }])
+})
+
+test('对外 API 基线协议 v1.0.0：可探测版本与能力，未知字段忽略，更高主版本只回带标记', async () => {
+  const api = createNotifyApi({ notify: () => ({ queued: true }), enqueue: () => true })
+  assert.equal(api.apiVersion, '1.0.0')
+  assert.ok(api.capabilities.includes('click.session'))
+  assert.ok(api.capabilities.includes('click.url'))
+  assert.equal(api.notify({ title: 'x', v: '9.0.0' }).unsupportedVersion, true)
+  assert.equal(api.notify({ title: 'x', v: '9.0.0' }).apiVersion, '9.0.0')
+  assert.equal(api.notify({ title: 'x', 未来字段: 1 }).ok, true, '未知字段一律忽略')
 })

@@ -1,5 +1,12 @@
 # Changelog
 
+## [未发布] - 2026-10-01
+
+- **对外 API 基线协议 v1.0.0**：服务上新增 `apiVersion` 与 `capabilities`（能力探测）；载荷可带 `v` 声明版本，**未知字段一律忽略**、更高主版本只回带 `unsupportedVersion` 而不中断推送；结果对象只增不改（新增 `apiVersion` / `unsupportedVersion`）。
+- **调试日志落文件**：`config.debug` 开启后状态日志写入 `$DSH_HOME/logs/dsh-desktop-notify/dsh-desktop-notify.log`（>1MB 轮转、保留 5 份），不再刷终端；同一文件也接住本插件 fiber 上的 cordis 日志（`ctx.logger.exporter`）。错误日志不变。
+- **修复**：启动播报等待时长配置 `startupWaitMs` 之前算出来却没用上（仍按默认 5s）——现在真正生效；自定义 `config.sender` 返回 rejected Promise 时同步 try/catch 抓不到、重试失效——现在归一成 Promise 再接住。
+- **修复（Service Worker）**：`registerServiceWorker()` 改为幂等（同一个 promise 复用，不再重复挂 `controllerchange` 监听与定时器）；SW 事件监听与客户端定时器全部纳入卸载清理；SW 的 `pageId → clientId` 映射写入 IndexedDB 并在 SW 复活时主动要求页面重报（事件驱动；**查不到映射时不再乱猜一个 DSH 标签页**，宁可新开也不跳错）；新增 `shown` 显示回执：SSE 写成功不再等于成功，超时或 `show-error` 时用原生 Toast 兜底。
+
 ## [1.8.10] - 2026-10-01
 
 - **变更：安装方式改走 DSH 自带的插件安装器，删除 `scripts/install.ps1` / `scripts/install.sh`**。官方插件文档明确要求「不要用 shell 命令复刻 `install_bundle` 的安装与 bundle 选择步骤」，而本包清单本就是一份合规 bundle（`dsh.bundle.patch` + `dsh.client` + `koffi` 在 `dependencies`），安装器能装依赖、选 bundle、启用并提示需批准的安装脚本；AUMID 注册表键由插件自己在启动时按主题写好，与安装步骤无关。README 与 `docs/getting-started.md` 改为：插件管理 → 添加插件 → 填本机目录路径或仓库地址。

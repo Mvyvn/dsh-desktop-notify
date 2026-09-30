@@ -974,8 +974,8 @@ test('对外 API：push 走门控并如实返回是否入队，pushAlways 绕过
 
   // 结构化明细：被静默 / 载荷无效 都能区分
   const detail = api.notify({ title: '结构化', sessionId: 's1' })
-  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced' })
-  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload' })
+  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.0.0', unsupportedVersion: false })
+  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload', apiVersion: '1.0.0', unsupportedVersion: false })
 })
 
 test('jobs：kind=subagent 的 job 不再重复通知（subagent/end 已经报过）', async () => {
