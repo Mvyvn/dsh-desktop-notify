@@ -378,14 +378,24 @@ export function apply(ctx, config) {
           deepLink: click.scheme || click.fallback || '',
         })
         if (sent > 0) {
+          lastRoute = { at: Date.now(), mode: 'web', pageId: pick.pageId, permission: pick.permission, reason: '' }
           log(`[dsh-desktop-notify] 走浏览器通知（页面 ${pick.pageId.slice(0, 8)}）: ${item.title}`)
           return
         }
+        lastRoute = { at: Date.now(), mode: 'native', pageId: pick.pageId, permission: pick.permission, reason: 'deliver-failed' }
         log('[dsh-desktop-notify] 页面在，但通知没推出去（连接刚断？），降级为原生 Toast')
       }
 
       // 降级：没有在线页面，或页面没有通知权限 → 原生 Toast，并在正文里说明降级原因
       const degraded = !web && !!pick
+      lastRoute = {
+        at: Date.now(),
+        mode: 'native',
+        pageId: pick ? pick.pageId : '',
+        permission: pick ? pick.permission : 'no-page',
+        reason: !pick ? 'no-online-page' : (web ? 'deliver-failed' : 'permission-not-granted'),
+      }
+      log(`[dsh-desktop-notify] 走原生 Toast（原因 ${lastRoute.reason}，页面权限 ${lastRoute.permission}）: ${item.title}`)
       sink({
         title: item.title,
         message: degraded
@@ -789,6 +799,8 @@ export function apply(ctx, config) {
     }
   }
   let lastSwReport: any = null
+  /** 最近一次通知走了哪条路（web / native）以及原因 —— 一眼看清为什么降级。 */
+  let lastRoute: any = null
   async function serveNotifyRoute(req, res) {
     const url = new URL(req.url || '/', 'http://localhost')
     const path = url.pathname.replace(/^\/dnotify\/?/, '').replace(/\/+$/, '')
@@ -900,6 +912,7 @@ export function apply(ctx, config) {
         lastClaim,
         lastNavigate,
         lastSwReport,
+        lastRoute,
         streams: [...openStreams.values()].map((m) => m.pageId || ''),
         gate: gate.size,
       })

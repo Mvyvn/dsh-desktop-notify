@@ -258,48 +258,57 @@
      * ——这是 1.6.3 及以前的实际 bug。真要开菜单也必须先确认它里面有「设置」，没有就按 Esc 关掉。
      */
     function openSettingsPlugins(): boolean {
-      var STAGES = ['launcher', 'shortcut-web', 'shortcut-desktop', 'account-menu', 'plugins-panel']
-      var stageIndex = 0
-      var iterations = 0
+      // 深链是"刚加载完的页面"：DSH 的界面往往要几秒才挂载出来，之前 2 秒就放弃 →
+      // 用户看到新 tab 开了、却停在原处。这里改成**重试到成功或超时**（10s）。
+      var deadline = Date.now() + 10000
+      var lastEntry = 0
+      var lastCellClick = 0
       var done = false
-      var modalWait = 0
       var timer = setInterval(function () {
         if (done) { clearInterval(timer); return }
-        iterations += 1
         var modal = settingsModal()
         if (modal) {
           var cell = findButton(modal, /内置插件|Built-in plugins/i)
           if (cell) {
-            try { (cell as HTMLElement).click() } catch (e) { /* ignore */ }
-            done = true
-            clearInterval(timer)
+            // 已经是当前分区就不用再点（避免连点：合成 click 会反复触发导航）
+            var current = ''
+            try { current = String(cell.getAttribute('aria-current') || '') } catch (e) { current = '' }
+            if (current === 'true') { done = true; clearInterval(timer); return }
+            var now = Date.now()
+            if (now - lastCellClick >= 600) {
+              lastCellClick = now
+              try { (cell as HTMLElement).click() } catch (e) { /* ignore */ }
+              blurActive()
+            }
+            if (now > deadline) {
+              done = true
+              clearInterval(timer)
+              try { console.warn('[dsh-desktop-notify] 点了「内置插件」但没等到它就位，停止尝试') } catch (e) { /* ignore */ }
+            }
             return
           }
-          // 弹窗在、导航格还没渲染完是常态（设置面板懒渲染）。以前一看到弹窗就收摊，
-          // 用户会停在"设置"而不是"设置 → 内置插件"。这里最多再等 2.5s 等它渲染出来；
-          // 真等不到就停下（设置已经打开了，交给用户自己点），并留一条日志。
-          modalWait += 1
-          if (modalWait >= 25) {
-            try { console.warn('[dsh-desktop-notify] 设置已打开，但没等到「内置插件」导航格，停止尝试') } catch (e) { /* ignore */ }
+          // 弹窗在、导航格还没渲染完是常态（设置面板懒渲染）→ 继续等，不动作
+          if (Date.now() > deadline) {
             done = true
             clearInterval(timer)
+            try { console.warn('[dsh-desktop-notify] 设置已打开但没等到「内置插件」导航格，停止尝试') } catch (e) { /* ignore */ }
           }
           return
         }
-        var stage = STAGES[stageIndex]
-        // 每段最多等 5 拍（500ms），全部走完 ~2s 就退到插件面板——不再让人等 6 秒
-        if (iterations === 1 || iterations % 5 === 1) {
-          if (stage === 'launcher') clickSettingsLauncher()
-          else if (stage === 'shortcut-web') { if (!isDesktopApp()) synthesizeSettingsShortcut(true) }
-          else if (stage === 'shortcut-desktop') { if (!isDesktopApp()) synthesizeSettingsShortcut(false) }
-          else if (stage === 'account-menu') clickAccountMenuSettings()
-          // 关键：**绝不**退到侧栏「插件」页。目标是"设置 → 内置插件"，落到「插件」页就是错的
-          // （这正是用户指出的问题）。找不到入口就继续等，等不到只留日志、让用户停在原处。
-          else if (stage === 'plugins-panel') { done = true; clearInterval(timer); console.warn('[dsh-desktop-notify] 没能打开设置；不降级到侧栏插件页'); return }
+        if (Date.now() > deadline) {
+          done = true
+          clearInterval(timer)
+          try { console.warn('[dsh-desktop-notify] 没能打开设置（绝不降级到侧栏插件页）') } catch (e) { /* ignore */ }
+          return
         }
-        if (iterations % 5 === 0) stageIndex += 1
-        if (stageIndex >= STAGES.length) { done = true; clearInterval(timer); console.warn('[dsh-desktop-notify] 没能打开设置；不降级到侧栏插件页') }
-      }, 100)
+        // 弹窗不在：最多每 600ms 试一次入口，优先级 真实设置按钮 → 账号菜单 → 合成快捷键
+        if (Date.now() - lastEntry < 600) return
+        lastEntry = Date.now()
+        if (clickSettingsLauncher()) return
+        if (isDesktopApp()) { clickAccountMenuSettings(); return }
+        synthesizeSettingsShortcut(true)
+        setTimeout(function () { if (!settingsModal()) synthesizeSettingsShortcut(false) }, 120)
+      }, 120)
       return true
     }
     /** 点真实的「设置」入口（按 aria-label/title 精确匹配，不碰其它菜单）。 */
