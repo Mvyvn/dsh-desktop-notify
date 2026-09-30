@@ -1,6 +1,6 @@
 # Changelog
 
-## [未发布] - 2026-10-01
+## [2.0.0] - 2026-10-01
 
 - **新增：插件设置页**（挂 `plugins.row.config`，与 `dsh-path-guard` 同一做法）：总开关、调试模式、对外 API 开关，以及 **11 种预设推送各自的开关 + 静默模式**。宿主侧新增 schemastery `Config`（按官方 volatile 规则：整个数组 volatile、元素普通），并把所有开关改为**运行时重读**——设置页改完由 settings 服务原子写回 `cordis.patch.yml` 并原地重载，无需重启。
 - **新增：静默模式三档**（`session` 默认 / `tab` 标签页级 / `never`）。`tab` 用浏览器原生的"标签页可见且持焦点"这一级信号，是比会话级更安静的档位。

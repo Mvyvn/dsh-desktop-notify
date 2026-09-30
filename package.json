@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-notify",
-  "version": "1.8.10",
+  "version": "2.0.0",
   "description": "使用系统推送 DSH 的提醒",
   "type": "module",
   "main": "lib/index.js",
@@ -24,7 +24,8 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.platform.json && tsc -p tsconfig.client.json",
     "check": "node scripts/check-syntax.mjs",
     "pretest": "npm run build",
-    "test": "node scripts/run-tests.mjs"
+    "test": "node scripts/run-tests.mjs",
+    "prepack": "npm run build"
   },
   "dsh": {
     "bundle": {
@@ -57,7 +58,12 @@
     "windows-toast",
     "winrt",
     "dbus",
-    "cordis"
+    "cordis",
+    "desktop-notification",
+    "toast",
+    "windows",
+    "linux",
+    "macos"
   ],
   "author": "沐云 (Mvyvn) <mvyvn@qq.com>",
   "contributors": [
@@ -83,5 +89,8 @@
     "title": "DSH 系统通知",
     "description": "使用系统推送 DSH 的提醒"
   },
-  "icon": "./assets/icon.svg"
+  "icon": "./assets/icon.svg",
+  "publishConfig": {
+    "access": "public"
+  }
 }
