@@ -1,4 +1,4 @@
-# TypeScript 6 迁移路线（面向 TS7）
+# TypeScript 6 → TS7 迁移记录
 
 ## 为什么迁
 
@@ -14,7 +14,7 @@
 - `tsconfig.json`：`strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` +
   `erasableSyntaxOnly`（禁止 enum/namespace/参数属性等会改变运行时的 TS 语法，与 TS7 的类型擦除方向一致）+
   `verbatimModuleSyntax` + `isolatedModules` + `module: nodenext`（输出真 ESM，DSH 的 Node 直接加载）。
-- `src/**/*.ts` → `lib/**/*.js`；**构建产物提交进仓库**（DSH 不编译插件，安装脚本按 `lib/` 分发）。
+- `src/**/*.ts` → `lib/**/*.js`；**构建产物提交进仓库**，并随包分发（DSH 不编译插件，只加载 `lib/`）。
 - `npm run build` 编译；`npm test` 会先构建再跑测试（测试直接测构建产物，等于把"源码与产物一致"也纳入回归）。
 
 ## 已完成（第一阶段：状态机 + 协议）
@@ -38,16 +38,15 @@
  winrt / toast-linux / index`（`tsconfig.platform.json`，先关 strict、逐步收紧）＋ `client`（`tsconfig.client.json`，
  `moduleDetection: "legacy"` 按脚本编译，避免 TS 在尾巴上加 `export {}` 破坏脚本式加载）。
 
-`npm run build` 依次跑这三个配置；产物落在 `lib/`（提交进仓库，DSH 不做编译）。
-验证：迁移前后 `git diff --ignore-all-space lib/` 只有缩进/分号/`"use strict"` 这类格式差异，行为由 149 项单测 +
+`npm run build` 依次跑这三个配置；产物落在 `lib/`（提交进仓库并随包分发）。
+验证：迁移前后 `git diff --ignore-all-space lib/` 只有缩进/分号/`"use strict"` 这类格式差异，行为由全部单测 +
  `dsh-runtime-probe`（真 cordis）+ `theme-probe`（真注册表）共同锁定。
 
-## 待迁移（遗留）：平台层的严格化
+## 现状：全部模块已在 `src/`，平台层未开 strict
 
-下面是旧文档里"第二阶段"的原始描述，保留作为平台层继续收紧时的接口草图：
+`tsconfig.platform.json` 目前显式关掉 `strict` / `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes`（`erasableSyntaxOnly` 仍然打开）：平台层大量与 WinRT / D-Bus 的 ABI 打交道，那里 `any` 是诚实的语义（指针、变体、HRESULT），一次性 strict 化只会写出一堆掩护性质的断言。要继续收紧就从这里开始——下面保留的是平台层抽象成接口时的草图：
 
-`lib/winrt.js`（koffi 直调 WinRT）、`lib/dbus.js`（手写 D-Bus 编解码）、`lib/theme*.js`、
-`lib/win32-registry.js` —— 这些是"平台适配"层，最值得先抽成接口：
+对应的就是现在这几个模块——`lib/winrt.js`（koffi 直调 WinRT）、`lib/toast-linux.js` + `lib/dbus.js`（手写 D-Bus 编解码）、`lib/theme*.js`、`lib/win32-registry.js`。真要再收紧，第一步是让它们对核心层只暴露明确接口：
 
 ```ts
 interface NotificationBackend {
@@ -60,12 +59,12 @@ interface ActivationBackend {
 }
 ```
 
-核心逻辑（协议 / 注册表 / 决策）**不应该知道** WinRT、D-Bus、portal 是什么；迁完之后平台目录按
+核心逻辑（协议 / 注册表 / 决策）**不应该知道** WinRT、D-Bus、portal 是什么；若继续拆分，平台目录按
 `platform/windows/*` 与 `platform/linux/*` 分开。
 
-## 第三阶段：宿主生命周期
+## 下一步：宿主生命周期
 
-`lib/index.js`（约 1000 行）与 `lib/client.js`（浏览器半区）按领域拆：通知队列、会话事件订阅、
+`lib/index.js`（约 1900 行）与 `lib/client.js`（浏览器半区）按领域拆：通知队列、会话事件订阅、
 启动播报、路由、客户端状态上报各自成模块；`client.js` 保持**零依赖**（浏览器半区由 DSH 打包，
 只允许 import 纯函数模块，例如现在的 `lib/protocol.js`）。
 
