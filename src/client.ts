@@ -406,6 +406,127 @@
         try { console.warn('[dsh-desktop-notify] 通知已认领，但目标在客户端目录里不存在（会话可能已被删除/归档）') } catch (e) { /* ignore */ }
       }
     }
+    /**
+     * 让浏览器自己接管通知点击：注册插件自带的 Service Worker（**不是扩展**，无需安装）。
+     *
+     *   notificationclick → clients.matchAll() → WindowClient.focus()
+     *     · 标签页在后台 → Firefox 自己把它交还给用户 ✓
+     *     · 标签页已在前台 → focus() 基本是 no-op ✓
+     * 不涉及 UIA/无障碍、SetForegroundWindow、PowerShell，也没有中转页。
+     */
+    var swRegistration: any = null
+    function announceToServiceWorker(reg: any): void {
+      try {
+        var target = navigator.serviceWorker.controller || (reg && reg.active)
+        if (target) target.postMessage({ type: 'register-page', pageId: getPageId() })
+      } catch (e) { /* ignore */ }
+    }
+    function sendToServiceWorker(msg: any): boolean {
+      try {
+        var reg = swRegistration
+        var target = navigator.serviceWorker.controller || (reg && (reg.active || reg.waiting || reg.installing))
+        if (!target) return false
+        target.postMessage(msg)
+        return true
+      } catch (e) { return false }
+    }
+    /** 每一步都回报宿主（/dnotify/sw/report → /status.lastSwReport）：失败不再无声。 */
+    function reportSw(payload: any): void {
+      try {
+        fetch(ROUTE_PREFIX + '/sw/report', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(Object.assign({ from: 'page' }, payload)),
+        }).catch(function () { /* ignore */ })
+      } catch (e) { /* ignore */ }
+    }
+    function notifyPermission(): string {
+      try { return (typeof Notification === 'undefined') ? 'unsupported' : String(Notification.permission) } catch (e) { return 'unknown' }
+    }
+    /** 权限不是 granted 时申请一次；Firefox 要用户手势，所以同时给出居中提示（见 showPermissionBanner）。 */
+    function ensureNotifyPermission(): void {
+      var state = notifyPermission()
+      if (state === 'granted') return
+      if (state === 'denied' || state === 'unsupported') { reportSw({ kind: 'permission', state: state }); return }
+      try {
+        Notification.requestPermission().then(function (s) {
+          reportSw({ kind: 'permission', state: String(s) })
+          if (String(s) !== 'granted') showPermissionBanner()
+        }).catch(function (e) {
+          reportSw({ kind: 'permission-error', message: String((e && e.message) || e) })
+        })
+      } catch (e) { /* ignore */ }
+    }
+    /**
+     * 权限不到位时的一次性居中提示：**那一次点击就是手势**，浏览器授权框随即正常弹出。
+     * 不做自动弹窗（Firefox 会拒绝无手势的 requestPermission）。
+     */
+    var permissionBannerShown = false
+    function showPermissionBanner(): void {
+      if (permissionBannerShown) return
+      permissionBannerShown = true
+      try {
+        var box = document.createElement('div')
+        box.setAttribute('data-dsh-notify-banner', '1')
+        box.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:50%;transform:translate(-50%,-50%);'
+          + 'background:#1f2430;color:#fff;font:14px/1.6 system-ui,sans-serif;padding:18px 22px;border-radius:10px;'
+          + 'box-shadow:0 10px 40px rgba(0,0,0,.45);max-width:340px;text-align:center;cursor:pointer'
+        box.textContent = '点击以允许发送通知'
+        box.addEventListener('click', function () {
+          try { box.remove() } catch (e) { /* ignore */ }
+          ensureNotifyPermission()
+        })
+        document.body.appendChild(box)
+      } catch (e) { /* ignore */ }
+    }
+    function registerServiceWorker(): void {
+      if (!('serviceWorker' in navigator)) return
+      try {
+        navigator.serviceWorker.register(ROUTE_PREFIX + '/sw.js', { scope: '/' })
+          .catch(function () { return navigator.serviceWorker.register(ROUTE_PREFIX + '/sw.js') })
+          .then(function (reg) {
+            swRegistration = reg
+            announceToServiceWorker(reg)
+            navigator.serviceWorker.addEventListener('controllerchange', function () { announceToServiceWorker(reg) })
+            try { navigator.serviceWorker.ready.then(function () { announceToServiceWorker(reg) }) } catch (e) { /* ignore */ }
+            // SW 冷启动/被回收后映射会丢：周期性重报
+            setInterval(function () { announceToServiceWorker(reg) }, 30000)
+            reportSw({ kind: 'register', pageId: getPageId(), permission: notifyPermission() })
+            if (notifyPermission() !== 'granted') showPermissionBanner()
+          })
+          .catch(function (e) {
+            reportSw({ kind: 'register-error', message: String((e && e.message) || e) })
+          })
+      } catch (e) { /* ignore */ }
+    }
+    // SW → 页面：点击通知后要求把目标会话切过来
+    try {
+      navigator.serviceWorker.addEventListener('message', function (event) {
+        var msg = event && event.data
+        if (!msg || msg.type !== 'dsh-navigate') return
+        reportSw({ kind: 'navigate-from-sw', target: String(msg.target || '') })
+        if (msg.target) applyTargetWithRetry(String(msg.target))
+      })
+    } catch (e) { /* ignore */ }
+    /**
+     * 通知内容到达（正式路径 `notify` 与验证用 `poc-notify` 共用本处理器）：
+     * 交给 SW 显示系统通知；点击时由 SW 精确激活本标签页并把 target 送回来。
+     */
+    function showNotificationFor(envelope: any): void {
+      var state = notifyPermission()
+      if (state !== 'granted') { ensureNotifyPermission(); showPermissionBanner() }
+      var sent = sendToServiceWorker({
+        type: 'show-notification',
+        title: String(envelope.title || 'DSH 通知'),
+        body: String(envelope.body || '点击查看'),
+        tag: String(envelope.tag || ('dsh-' + String(envelope.id || Date.now()))),
+        pageId: getPageId(),
+        target: String(envelope.target || ''),
+        deepLink: String(envelope.deepLink || ''),
+      })
+      reportSw({ kind: 'show-request', sent: sent, permission: state, target: String(envelope.target || '') })
+      if (!sent) registerServiceWorker()
+    }
     /** 认领**这一次**点击：带 openId，连点两条通知也不会认领错。 */
     function claimOpen(openId: string): void {
       var body = { pageId: getPageId(), openId: String(openId) }
@@ -432,6 +553,7 @@
     function openEventStream(): void {
       if (eventStream) return
       if (typeof window.EventSource !== 'function') return
+      registerServiceWorker()
       try {
         eventStream = new window.EventSource(ROUTE_PREFIX + '/' + EVENTS_ENDPOINT
           + '?pageId=' + encodeURIComponent(getPageId()))
@@ -443,6 +565,14 @@
           // 归属由宿主在 /claim 里裁决；被拒时重报一次身份自愈（pageId 变过的情况）。
           claimOpen(String(envelope.id))
         })
+        // 通知内容到达：交给 SW 显示系统通知（正式路径 notify 与验证用 poc-notify 共用）
+        var onNotify = function (event) {
+          var envelope = null
+          try { envelope = JSON.parse((event && event.data) || '{}') } catch (e) { envelope = null }
+          if (envelope) showNotificationFor(envelope)
+        }
+        eventStream.addEventListener('notify', onNotify)
+        eventStream.addEventListener('poc-notify', onNotify)
         eventStream.addEventListener('error', function () {
           // EventSource 自己会按 retry 重连；这里只在彻底关闭时清空引用
           try { if (eventStream && eventStream.readyState === 2) eventStream = null } catch (e) { /* ignore */ }

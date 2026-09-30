@@ -22,6 +22,9 @@
 //
 // 另外对外提供 ctx.get('desktopNotify') 服务（见 lib/api.js），其它插件可直接推送。
 
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createFocusGate, sessionIdList } from './gate.js'
 import { createNotifyApi } from './api.js'
 import {
@@ -699,6 +702,24 @@ export function apply(ctx, config) {
       + `<p>${String(line).replace(/[<>&"]/g, '')}</p><script>try{window.close()}catch(e){}</script>`
       + `<!-- target=${safe} -->`
   }
+  /**
+   * 让 **浏览器自己**处理通知点击。
+   *
+   * 关键能力是 Service Worker 的 `notificationclick` → `clients.matchAll()` → `WindowClient.focus()`：
+   * 同源、事件驱动、浏览器内部完成 —— 不需要浏览器扩展、不需要 UIA/无障碍、不需要
+   * SetForegroundWindow 或 PowerShell，也没有"外部进程去控制浏览器标签页"的越权问题。
+   *
+   * 脚本是仓库里的真实文件 `assets/dnotify-sw.js`（插件自身提供，**不是扩展**，无需安装）。
+   */
+  function swScript(): string {
+    try {
+      return readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'dnotify-sw.js'), 'utf8')
+    } catch (e) {
+      log('[dsh-desktop-notify] 读取 SW 脚本失败: ' + (e as Error).message)
+      return '// sw script missing'
+    }
+  }
+  let lastSwReport: any = null
   async function serveNotifyRoute(req, res) {
     const url = new URL(req.url || '/', 'http://localhost')
     const path = url.pathname.replace(/^\/dnotify\/?/, '').replace(/\/+$/, '')
@@ -809,7 +830,8 @@ export function apply(ctx, config) {
         })),
         lastActivate,
         lastClaim,
-    lastNavigate,
+        lastNavigate,
+        lastSwReport,
         streams: [...openStreams.values()].map((m) => m.pageId || ''),
         gate: gate.size,
       })
@@ -879,6 +901,39 @@ export function apply(ctx, config) {
       req.on('close', drop)
       res.on('close', drop)
       log(`[dsh-desktop-notify] events stream open (pages=${openStreams.size})`)
+      return
+    }
+
+    if (path === 'sw.js' && method === 'GET') {
+      // service-worker-allowed 让该脚本可以声明 scope=/（脚本在 /dnotify 下，但要控制 DSH 页面本身）
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        'service-worker-allowed': '/',
+      })
+      res.end(swScript())
+      return
+    }
+
+    if (path === 'sw/report' && method === 'POST') {
+      // SW 与页面把每一步结果写到这里（成功/失败/降级原因都留痕，不再无声）
+      const body = await readJsonBody(req)
+      lastSwReport = { at: Date.now(), ...(body || {}) }
+      log(`[dsh-desktop-notify] SW: ${JSON.stringify(lastSwReport)}`)
+      json(res, 200, { ok: true })
+      return
+    }
+
+    if (path === 'poc-notify' && method === 'GET') {
+      // 让在线 DSH 页面显示一条通知（点击由 SW 接管，不经过原生 Toast）
+      const target = url.searchParams.get('target') || 'page:settings-plugins'
+      const envelope = { id: 'poc-' + Date.now().toString(36), target, targetPageId: '', at: Date.now() }
+      let sent = 0
+      for (const [streamRes] of [...openStreams]) {
+        try { streamRes.write(`event: poc-notify\ndata: ${JSON.stringify(envelope)}\n\n`); sent += 1 } catch (e) { /* ignore */ }
+      }
+      log(`[dsh-desktop-notify] PoC 通知已发给 ${sent} 个在线页面`)
+      json(res, 200, { ok: sent > 0, sent })
       return
     }
 
