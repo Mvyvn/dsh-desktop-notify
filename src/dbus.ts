@@ -14,6 +14,12 @@
 // 连接是惰性建立并常驻复用的：断开后下次发送自动重连，失败有冷却与错误去重。
 
 import { connect } from 'node:net'
+/** 计时器不参与"让进程活着"的判定：常驻插件的超时/重试计时器一律 unref。 */
+function unrefTimer(t: any): any {
+  if (t && typeof t.unref === 'function') t.unref()
+  return t
+}
+
 
 const METHOD_CALL = 1
 const METHOD_RETURN = 2
@@ -642,10 +648,10 @@ function beginHello(s) {
   })
   const entry = {
     serial: serialOfCall,
-    timer: setTimeout(() => {
+    timer: unrefTimer(setTimeout(() => {
       calls.delete(serialOfCall)
       fail(s, `Hello 超时（${DEFAULT_CALL_TIMEOUT_MS}ms）`)
-    }, DEFAULT_CALL_TIMEOUT_MS),
+    }, DEFAULT_CALL_TIMEOUT_MS)),
     resolve: (args) => {
       uniqueName = typeof args[0] === 'string' ? args[0] : ''
       helloPending = false
@@ -721,6 +727,10 @@ function createSession() {
   }
   const socket = connect({ path })
   s.socket = socket
+  // 常驻连接不该把宿主进程钉在事件循环里（DSH 自己 hold 住进程）。不 unref 的话，任何
+  // "import 本模块并连上总线"的进程都永远不会自然退出——CI（Linux，无桌面总线）上就是
+  // `npm test` 六小时不结束、被 runner 强杀；本地走 win32 后端所以看不出来。
+  if (typeof (socket as any).unref === 'function') (socket as any).unref()
   // 半开/挂死的总线（接受连接但不回 SASL）必须有超时兜底，
   // 否则 ready 永远为 false、消息全部堆在 pending 里静默丢失。
   socket.setTimeout(HANDSHAKE_TIMEOUT_MS, () => {
@@ -826,11 +836,11 @@ export function call(m) {
     const timeoutMs = m.timeoutMs || DEFAULT_CALL_TIMEOUT_MS
     const entry = {
       serial: serialOfCall,
-      timer: setTimeout(() => {
+      timer: unrefTimer(setTimeout(() => {
         calls.delete(serialOfCall)
         rememberExpired(serialOfCall)
         reject(new Error(`D-Bus 调用超时（${timeoutMs}ms）: ${m.interface}.${m.member}`))
-      }, timeoutMs),
+      }, timeoutMs)),
       resolve,
       reject,
     }

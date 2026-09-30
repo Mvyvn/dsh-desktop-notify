@@ -497,6 +497,25 @@ test('定时任务：create 才通知（delete/dispatch 不打扰）', async () 
   assert.equal(h.sent[0].click.wire, 'session:s1')
 })
 
+test('跳转结果回报：认领成功但客户端跳不过去时，记录进 /status', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  const ack = await h.request({
+    method: 'POST', url: '/dnotify/navigated',
+    body: { openId: 'op-1', result: 'not-found', pageId: 'p1' },
+  })
+  assert.equal(ack.status, 200)
+
+  // /status 的令牌校验是严格的（旧令牌一律 403）：读插件放在 globalThis 上的当前令牌
+  const token = globalThis.__dshDesktopNotifyClickToken
+  assert.equal(typeof token, 'string')
+  const st = await h.request({ method: 'GET', url: '/dnotify/status?t=' + token })
+  assert.equal(st.status, 200)
+  const payload = JSON.parse(st.body)
+  assert.equal(payload.lastNavigate.result, 'not-found', '认领≠跳转：失败结果必须留痕')
+  assert.equal(payload.lastNavigate.openId, 'op-1')
+  assert.equal(payload.lastNavigate.pageId, 'p1')
+})
+
 test('launch 默认走浏览器落地页（实测协议激活在未打包宿主上不触发），可显式改回协议', async () => {
   // 默认：launch 是 http 落地页 —— 浏览器必然打开它，因此点击一定能到达宿主
   const byDefault = await start({ roots: [ROOT_AGENT] })

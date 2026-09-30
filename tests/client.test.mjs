@@ -108,6 +108,8 @@ function createPage(options = {}) {
     removeEventListener: remove('document'),
     get visibilityState() { return state.visible ? 'visible' : 'hidden' },
     hasFocus: () => state.focused,
+    // 桌面端（Electron）判定读 <html data-platform=…>：给骨架一个可控的 dataset
+    get documentElement() { return { dataset: options.desktopPlatform ? { platform: options.desktopPlatform } : {} } },
     querySelector: (selector) => {
       if (selector === '[data-shortcut-modal="settings"]') return state.settingsModal
       if (selector === 'button[aria-haspopup="menu"]') return state.menuTrigger || null
@@ -401,6 +403,43 @@ test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
   page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
   assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+})
+
+test('跳转结果回报：会话不在目录里时 POST /navigated（认领成功≠跳转成功）', async () => {
+  const page = createPage({
+    uiWorkspace: true,
+    openSessionThrows: true,          // openSession 抛错 = 'not-found'
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'session:s-gone' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-9', target: 'ignored' }))
+  await tick()
+  page.advance(200)
+  await tick()
+  const nav = page.fetches.filter((f) => String(f.url).includes('navigated'))
+  assert.equal(nav.length, 1, '应回报一次跳转结果')
+  const navBody = JSON.parse(nav[0].init.body)
+  assert.equal(navBody.result, 'not-found')
+  assert.equal(navBody.openId, 'op-9')
+})
+
+test('DSH 桌面端不合成设置快捷键（快捷键由原生输入接管）', async () => {
+  const page = createPage({
+    desktopPlatform: 'win32',
+    pluginNavigation: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored' }))
+  await tick()
+  page.advance(700)     // 桌面端：跳过两段快捷键，只走 launcher → 菜单
+  await tick()
+  assert.equal(page.state.keyboardEvents.length, 0, '桌面端合成 keydown 不会触发命令，不该白等')
+  page.advance(1800)    // 走完剩余各段 → 退到能用的插件面板
+  await tick()
+  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'], '最后仍要退到能用的插件面板')
 })
 
 test('跳转 page:settings-plugins → 点真实设置入口打开设置并点「内置插件」', async () => {

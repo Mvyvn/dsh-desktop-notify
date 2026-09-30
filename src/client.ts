@@ -31,6 +31,7 @@
     var ROUTE_PREFIX = 'dnotify'      // 文档相对：挂载在子路径下时也正确
     var FOCUS_ENDPOINT = 'page-focus'
     var EVENTS_ENDPOINT = 'events'
+    var NAVIGATED_ENDPOINT = 'navigated'   // 认领后回报“到底跳没跳成”
     var CLAIM_ENDPOINT = 'claim'
     /** 聚焦心跳间隔：必须显著小于宿主 gate 的保鲜时长（2 分钟）。 */
     var HEARTBEAT_MS = 60000
@@ -203,8 +204,8 @@
         // 每段最多等 5 拍（500ms），全部走完 ~2s 就退到插件面板——不再让人等 6 秒
         if (iterations === 1 || iterations % 5 === 1) {
           if (stage === 'launcher') clickSettingsLauncher()
-          else if (stage === 'shortcut-web') synthesizeSettingsShortcut(true)
-          else if (stage === 'shortcut-desktop') synthesizeSettingsShortcut(false)
+          else if (stage === 'shortcut-web') { if (!isDesktopApp()) synthesizeSettingsShortcut(true) }
+          else if (stage === 'shortcut-desktop') { if (!isDesktopApp()) synthesizeSettingsShortcut(false) }
           else if (stage === 'account-menu') clickAccountMenuSettings()
           else if (stage === 'plugins-panel') { done = true; clearInterval(timer); openPluginsPanel(); return }
         }
@@ -306,14 +307,35 @@
     }
     /**
      * 处理未就绪时有限次重试；'not-found'（会话真的不在目录里）立即放弃、绝不刷新。
+     *
+     * 每次拿到终态都回报一次结果：**认领成功 ≠ 跳转成功**——通知活得比会话久时
+     * （会话被删/归档、客户端目录里没有它），宿主已经按"已认领"停掉了新开兜底，
+     * 而这里只会得到 'not-found'。回报出去，宿主至少能留下可诊断的记录，
+     * 不再是"点了通知什么都没发生，也没有任何痕迹"。
      */
-    function applyTargetWithRetry(target: string): void {
-      if (applyTarget(target) !== 'not-ready') return
+    function applyTargetWithRetry(target: string, openId?: string): void {
+      var first = applyTarget(target)
+      if (first !== 'not-ready') { reportNavigate(openId, first); return }
       var attempts = 0
       var timer = setInterval(function () {
         attempts += 1
-        if (applyTarget(target) !== 'not-ready' || attempts >= NAV_RETRIES) clearInterval(timer)
+        var result = applyTarget(target)
+        if (result !== 'not-ready' || attempts >= NAV_RETRIES) {
+          clearInterval(timer)
+          if (result !== 'not-ready') reportNavigate(openId, result)
+        }
       }, NAV_RETRY_MS)
+    }
+    /** 把"这次跳转最后到底成没成"回报给宿主（尽力而为，失败只记控制台）。 */
+    function reportNavigate(openId: string | undefined, result: string): void {
+      if (!openId) return
+      try {
+        post(NAVIGATED_ENDPOINT, { pageId: getPageId(), openId: String(openId), result: String(result) })
+          .catch(function () { /* ignore */ })
+      } catch (e) { /* ignore */ }
+      if (result === 'not-found') {
+        try { console.warn('[dsh-desktop-notify] 通知已认领，但目标在客户端目录里不存在（会话可能已被删除/归档）') } catch (e) { /* ignore */ }
+      }
     }
     /** 认领**这一次**点击：带 openId，连点两条通知也不会认领错。 */
     function claimOpen(openId: string): void {
@@ -323,7 +345,7 @@
           // 页面可能在后台标签里：先请求把本窗口带到前台（浏览器可以忽略，忽略也无害），
           // 再把目标落到 UI 上——否则用户会觉得"点了没反应"。
           try { window.focus() } catch (e) { /* ignore */ }
-          applyTargetWithRetry(String(res.target))
+          applyTargetWithRetry(String(res.target), openId)
         } else if (res && res.reason === 'not-owner') {
           // 本页的 pageId 在宿主那边已经过期（例如刷新过/身份被覆盖）：重报一次身份，
           // 下一次点击就能找到我。绝不静默丢弃。
@@ -381,6 +403,15 @@
       else applyTargetWithRetry(raw)
     }
     /** 等服务就绪后执行一次 hash 目标（最多等 ~15s，不刷新页面）。 */
+    function isDesktopApp(): boolean {
+      // DSH 桌面端（Electron）由 preload 在 <html data-platform=…> 上标出平台。关键差异：
+      // 桌面端的快捷键由**原生输入**接管，合成 DOM keydown 不会触发命令，所以那边只走
+      // “点真实入口”这条路，不用白等两段快捷键超时（也少一次无意义的 DOM 事件）。
+      try {
+        var el = document && document.documentElement
+        return !!(el && el.dataset && el.dataset.platform)
+      } catch (e) { return false }
+    }
     function waitForWorkspaceThen(raw: string): void {
       var attempts = 0
       var timer = setInterval(function () {
