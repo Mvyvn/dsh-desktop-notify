@@ -44,6 +44,8 @@ async function showNotification(data) {
     const reg = await self.registration.showNotification(String(data.title || 'DSH'), {
       body: String(data.body || ''),
       tag: String(data.tag || 'dsh-poc'),
+      // 图标由宿主提供（GET /dnotify/icon.png，按主题返回 PNG —— Web Notification 不认 .ico）
+      icon: data.icon ? String(data.icon) : undefined,
       data: {
         pageId: String(data.pageId || ''),
         target: String(data.target || ''),

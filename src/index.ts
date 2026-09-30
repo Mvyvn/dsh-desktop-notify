@@ -35,7 +35,8 @@ import { PageRegistry } from './pages.js'
 import { planActivation } from './activation.js'
 import { createBoundedMap, createDeduper } from './state.js'
 import { truncateText } from './text.js'
-import { startThemeWatch, stopThemeWatch } from './theme.js'
+import { ASSETS_DIR, iconPathsFor } from './icons.js'
+import { currentTheme, startThemeWatch, stopThemeWatch } from './theme.js'
 
 // 发送层按平台动态加载：win32 之外**绝不能** import winrt.js
 // （它顶层 koffi.load('combase.dll') 在非 Windows 平台会直接失败）。
@@ -960,6 +961,21 @@ export function apply(ctx, config) {
       req.on('close', drop)
       res.on('close', drop)
       log(`[dsh-desktop-notify] events stream open (pages=${openStreams.size})`)
+      return
+    }
+
+    if (path === 'icon.png' && method === 'GET') {
+      // 浏览器通知的图标：必须是 PNG（Web Notification 不认 .ico），按当前主题选深浅两套之一。
+      // 同一个 URL 长期稳定，便于 Firefox 缓存；失败也不影响通知本身。
+      try {
+        const file = iconPathsFor(currentTheme()).png
+        const buf = readFileSync(join(ASSETS_DIR, basename(file)))
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=3600' })
+        res.end(buf)
+      } catch (e) {
+        res.writeHead(404, { 'cache-control': 'no-store' })
+        res.end('no icon')
+      }
       return
     }
 
