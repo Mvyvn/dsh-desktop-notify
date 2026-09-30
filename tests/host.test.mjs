@@ -369,7 +369,7 @@ test('点击（降级模式）：一律 302 到 DSH 深链，新开标签页跳�
   const tabB = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   // 两个页面都开着，用户最后在 A 上操作
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('session:s1')}` })
   assert.equal(click.status, 302, '降级模式点击一律 302：由浏览器新开标签页跳 DSH')
   assert.match(String(click.headers.location || ''), /#dsh-notify=/, '深链要带目标会话')
   assert.ok(!/event: navigate/.test(tabA.res.chunks.join('')), '点击不再向页面投递（投递已前移到发送时）')
@@ -378,7 +378,7 @@ test('点击（降级模式）：一律 302 到 DSH 深链，新开标签页跳�
 
 test('点击三态③：没有可投递页面 → 302 到 DSH 深链（由浏览器拉起 DSH）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('session:s1')}` })
   assert.equal(click.status, 302)
   assert.match(String(click.headers.location), /\/#dsh-notify=session%3As1$/)
   // 没有待认领条目：稍后连上的页面靠 hash 自己跳，不会被重放（避免跳两遍）
@@ -389,7 +389,7 @@ test('点击三态③：没有可投递页面 → 302 到 DSH 深链（由浏览
 test('url 目标：宿主直接给出外部地址（与 DSH 页面无关）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx')}` })
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx')}` })
   assert.equal(click.status, 302)
   assert.equal(click.headers.location, 'https://example.com/x')
 })
@@ -565,7 +565,7 @@ test('点击投递：每次点击有唯一 openId，连点两条不会串单', a
   const claims = []
   for (const target of ['session:s1', 'session:s2']) {
     // 像真实客户端：点击请求会等认领，所以先并发发起，再认领，最后收结果
-    const pending = h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent(target)}` })
+    const pending = h.request({ method: 'GET', url: `/dnotify/activate?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent(target)}` })
     await new Promise((resolve) => setTimeout(resolve, 10))
     const openId = envelopeIds(stream).pop()
     ids.push(openId)
@@ -586,7 +586,7 @@ test('归属校验：非目标页面即使拿到 openId 也不能认领', async 
   const tabA = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pA' })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  const pendingClick = h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const pendingClick = h.request({ method: 'GET', url: `/dnotify/activate?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('session:s1')}` })
   await new Promise((resolve) => setTimeout(resolve, 10))
   const openId = envelopeId(tabA)
   const stolen = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'pB', openId } })).body)
@@ -603,7 +603,7 @@ test('页面注册表：失焦后仍投给"最后用过"的页面（用户此刻
   // A 聚焦（seq=5）→ 然后失焦（seq=6）：此刻**没有**聚焦页面，但"最后用过"仍是 A
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 5, pageId: 'pA', sessionId: 's1' } })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: false, seq: 6, pageId: 'pA', sessionId: 's1' } })
-  await h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s1')}` })
+  await h.request({ method: 'GET', url: `/dnotify/activate?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('session:s1')}` })
   assert.match(tabA.res.chunks.join(''), /event: navigate/, '切去别的应用后仍应投给"最后用的那个页面"')
   assert.ok(!/event: navigate/.test(tabB.res.chunks.join('')), 'B 从来没被聚焦过，不该收到')
 })
@@ -616,7 +616,7 @@ test('页面注册表：同一页面的旧 seq 上报不覆盖新状态', async 
   // 乱序到达的旧状态（seq=9 声称失焦）：必须是 stale，不能把 B 的聚焦状态抹掉
   const late = await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: false, seq: 9, pageId: 'pB', sessionId: 's2' } })
   assert.equal(JSON.parse(late.body).verdict, 'stale')
-  await h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s2')}` })
+  await h.request({ method: 'GET', url: `/dnotify/activate?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('session:s2')}` })
   assert.match(tabB.res.chunks.join(''), /event: navigate/, 'B 仍应是目标页面')
 })
 
@@ -627,7 +627,7 @@ test('SSE：连接的页面立刻拿到该投给自己的跳转，未知端点 4
   assert.match(String(stream.headers['content-type']), /text\/event-stream/)
   assert.match(stream.res.chunks.join(''), /retry: 2000/)
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const { click } = await clickAndClaim(h, `/dnotify/activate?t=x&raw=${encodeURIComponent('page:plugins')}`, stream, 'p1')
+  const { click } = await clickAndClaim(h, `/dnotify/activate?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('page:plugins')}`, stream, 'p1')
   assert.equal(click.status, 200)
   assert.match(stream.res.chunks.join(''), /event: navigate/)
   assert.match(stream.res.chunks.join(''), /page:plugins/)
@@ -638,24 +638,24 @@ test('SSE：连接的页面立刻拿到该投给自己的跳转，未知端点 4
 test('激活端点：无页面时回 open（交给系统打开），有页面时回 delivered（不开窗口）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   // 没有页面：由调用方（转发器/portal）去打开 DSH 深链
-  const noPage = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })).body)
+  const noPage = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=session%3As1' })).body)
   assert.equal(noPage.action, 'open')
   assert.match(String(noPage.url), /\/#dsh-notify=session%3As1$/)
   // 有页面并聚焦：投递，**不给调用方任何要打开的地址**
   const tab = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
   // 页面像真实客户端那样认领 → 宿主才回 delivered
-  const pendingActivate = h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })
+  const pendingActivate = h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=session%3As1' })
   await new Promise((resolve) => setTimeout(resolve, 5))
   await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: envelopeIds(tab).pop() } })
   const delivered = JSON.parse((await pendingActivate).body)
   assert.deepEqual(delivered, { action: 'delivered', pageId: 'p1' })
   assert.match(tab.res.chunks.join(''), /event: navigate/)
   // 目标为空：ignore
-  const ignored = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=none' })).body)
+  const ignored = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=none' })).body)
   assert.deepEqual(ignored, { action: 'ignore', reason: 'no-target' })
   // url 目标：交给外部打开
-  const external = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=' + encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx') })).body)
+  const external = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=' + encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx') })).body)
   assert.deepEqual(external, { action: 'open', url: 'https://example.com/x' })
 })
 
@@ -664,13 +664,13 @@ test('投递后没人认领 → 不静默失败，改成新开深链', async () 
   const tab = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
   // 页面"连着但卡住"（比如旧客户端、冻结的标签页）：只投递、不认领
-  const activate = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })).body)
+  const activate = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=session%3As1' })).body)
   assert.equal(activate.action, 'open', '不能把"写进 socket"当成"已经跳了"')
   assert.match(String(activate.url), /#dsh-notify=session%3As1$/)
   assert.equal(activate.reason, 'unclaimed')
   assert.match(tab.res.chunks.join(''), /event: navigate/, '消息仍然推给了页面（它自己慢一步也没关系）')
   // 协议激活端点（claim 语义在这里）：没人认领 → 回 open + 深链，而不是静默失败
-  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })
+  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=session%3As1' })
   assert.equal(click.status, 200)
   const openBody = JSON.parse(click.body)
   assert.equal(openBody.action, 'open')
@@ -760,7 +760,7 @@ test('SSE：流断开后不再推送，也不会因为心跳而报错', async ()
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   stream.res.emit('close')   // 页面关闭：摘掉订阅 + 停掉心跳
   // 断开后没有可投递页面 → 协议激活端点回 open + 深链兜底，不再挂起
-  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=' + encodeURIComponent('page:plugins') })
+  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=' + globalThis.__dshDesktopNotifyClickToken + '&raw=' + encodeURIComponent('page:plugins') })
   assert.equal(click.status, 200, '断开后新点击不应把路由打挂')
   assert.equal(JSON.parse(click.body).action, 'open')
   const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: 'x' } })

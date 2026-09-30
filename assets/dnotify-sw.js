@@ -134,7 +134,10 @@ async function showNotification(data) {
 
 function isDshClient(client) {
   const url = String((client && client.url) || '')
-  return url.indexOf('127.0.0.1:3080') >= 0 && url.indexOf('/dnotify/click') < 0
+  if (url.indexOf('/dnotify/click') >= 0) return false
+  // 宿主 origin 是动态的（dsh web 可换端口/主机名），用 SW 自身 origin 判断，
+  // 不能硬编码 127.0.0.1:3080 —— 否则"只有一个 DSH 窗口就直接用它"这条回退永远不成立。
+  try { return new URL(url).origin === String(self.location.origin) } catch (e) { return false }
 }
 
 /** 最近一次处于聚焦状态的 pageId（页面 focus/blur 时主动告知）。 */

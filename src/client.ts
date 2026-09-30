@@ -680,6 +680,15 @@
     }
     var swRegisterPromise: Promise<any> | null = null
     /** 接线只做一次：注册、监听、权限观察、首次回报。 */
+    /** SW 让我就地跳转（通知点击）。**具名**：卸载时必须摘掉，否则 HMR 后新旧实例各执行一次。 */
+    function onSwNavigate(event: any): void {
+      try {
+        var msg = event && event.data
+        if (!msg || msg.type !== 'dsh-navigate') return
+        reportSw({ kind: 'navigate-from-sw', target: String(msg.target || '') })
+        if (msg.target) applyTargetWithRetry(String(msg.target))
+      } catch (e) { /* ignore */ }
+    }
     function wireServiceWorker(reg: any): void {
       swRegistration = reg
       announceToServiceWorker(reg)
@@ -715,12 +724,7 @@
     }
     // SW → 页面：点击通知后要求把目标会话切过来
     try {
-      navigator.serviceWorker.addEventListener('message', function (event) {
-        var msg = event && event.data
-        if (!msg || msg.type !== 'dsh-navigate') return
-        reportSw({ kind: 'navigate-from-sw', target: String(msg.target || '') })
-        if (msg.target) applyTargetWithRetry(String(msg.target))
-      })
+      navigator.serviceWorker.addEventListener('message', onSwNavigate)
     } catch (e) { /* ignore */ }
     /**
      * 通知内容到达（正式路径 `notify` 与验证用 `poc-notify` 共用本处理器）：
@@ -1385,6 +1389,7 @@
           clearClientTimers()
           // SW 事件监听也要摘（否则 HMR 后新旧实例各报一次 register/permission）
           try { navigator.serviceWorker.removeEventListener('controllerchange', onSwControllerChange) } catch (e) { /* ignore */ }
+        try { navigator.serviceWorker.removeEventListener('message', onSwNavigate) } catch (e) { /* ignore */ }
           try { navigator.serviceWorker.removeEventListener('message', onSwReAnnounce) } catch (e) { /* ignore */ }
           closeEventStream()
           window.removeEventListener('focus', onFocus)

@@ -154,7 +154,10 @@ export function apply(ctx, config) {
   // 处理：每个 apply 都把"当前实例"挂到 globalThis；路由处理器一律转交给**最新实例**，
   // 总开关也以最新实例的 config 为准 —— 这样即使旧实例没被 dispose，也不会再影响行为。
   const instanceId = (((globalThis as any).__dshNotifyInstanceSeq = (((globalThis as any).__dshNotifyInstanceSeq) || 0) + 1))
-  const isNewest = (): boolean => (globalThis as any).__dshNotifyInstance === instanceId
+  // 只有**成功挂上路由**的实例才算接管：注册失败说明同进程已有旧实例持有路由，
+  // 那时新实例的 openStreams 是空的，接管只会让浏览器通知与就地跳转全部失效。
+  let routeReady = false
+  const isNewest = (): boolean => routeReady && (globalThis as any).__dshNotifyInstance === instanceId
   // 认领最新实例并把配置发布到进程级（旧实例读到的也是这份）
   const publishConfig = (): void => {
     try {
@@ -168,8 +171,7 @@ export function apply(ctx, config) {
       log(`[dsh-desktop-notify] 实例 #${instanceId} 已接管（enabled=${(config as any)?.enabled !== false}）`)
     } catch (e) { /* ignore */ }
   }
-  // apply 一开始就认领：先于任何通知/路由注册发生
-  publishConfig()
+  // 注意：认领 "最新实例" 放到路由注册**成功之后**（见 publishConfig 的调用点）
 
   /**
    * volatile 字段必须**每次读引用**，不能把 apply 参数里那份快照当准。
@@ -210,7 +212,9 @@ export function apply(ctx, config) {
   // 顺带把 cordis 自己的日志（本插件 fiber 上的）也接进同一个文件 —— 官方就是靠 exporter，
   // 它挂当前 fiber，插件卸载时自动移除。
   try {
-    if (ctx.logger && typeof ctx.logger.exporter === 'function') {
+    // 仅调试模式才落盘：cordis 的判定是 targetLevel < level 才跳过，default:3 = 导出全部级别，
+    // 而 writeLog 每条都 statSync + appendFileSync（主线程同步 IO）。这也和设置页写的语义一致。
+    if (debugOn() && ctx.logger && typeof ctx.logger.exporter === 'function') {
       ctx.logger.exporter({
         levels: { default: 3 },
         export: (record) => {
@@ -435,7 +439,8 @@ export function apply(ctx, config) {
     pendingStartup = send
     const wait = Number.isFinite(Number(config && config.startupWaitMs)) ? Number(config.startupWaitMs) : waitMs
     log(`[dsh-desktop-notify] 启动播报：等在线 DSH 页面出现（最多 ${wait}ms）再发，以便走浏览器通知`)
-    setTimeout(() => {
+    // 用登记过的 later()：插件卸载/HMR 后不再触发，也不阻止进程退出
+    later(() => {
       if (pendingStartup !== send) return
       pendingStartup = null
       log('[dsh-desktop-notify] 启动播报：等页面超时，降级为原生 Toast')
@@ -584,8 +589,7 @@ export function apply(ctx, config) {
 
       // 降级：没有在线页面，或页面没有通知权限 → 原生 Toast
       sendNativeNow(item, click,
-        !pick ? 'no-online-page' : (web ? 'deliver-failed' : 'permission-not-granted'),
-        !web && !!pick)
+        !pick ? 'no-online-page' : (web ? 'deliver-failed' : 'permission-not-granted'))
     } catch (e) {
       console.error('[dsh-desktop-notify] sendToast failed:', e && e.message)
       if (!item._retried) { item._retried = true; queue.unshift(item) }
@@ -598,7 +602,7 @@ export function apply(ctx, config) {
    * sink 可能是自定义 sender（`config.sender`），允许返回 Promise —— 那样失败是
    * **rejection**，同步 try/catch 抓不到，重试就形同虚设。这里统一归一成 Promise 再接住。
    */
-  function sendNativeNow(item, click, reason: string, degraded: boolean): void {
+  function sendNativeNow(item, click, reason: string): void {
     lastRoute = {
       at: Date.now(),
       mode: 'native',
@@ -642,7 +646,7 @@ export function apply(ctx, config) {
       if (!rec || rec.acked || rec.failed) return
       // 没有 shown、也没有 show-error：判定为"浏览器这条路没把通知显示出来"，原生兜底。
       log(`[dsh-desktop-notify] 浏览器通知在 ${SHOWN_ACK_MS}ms 内没有显示回执，改用原生 Toast 兜底: ${item.title}`)
-      sendNativeNow(rec.item, rec.click, 'no-shown-ack', true)
+      sendNativeNow(rec.item, rec.click, 'no-shown-ack')
     }, SHOWN_ACK_MS)
   }
   /** SW/页面上报显示结果：shown 落地，show-error 立刻兜底（不用等满期限）。 */
@@ -655,7 +659,7 @@ export function apply(ctx, config) {
       rec.failed = error
       shownPending.delete(key)
       log(`[dsh-desktop-notify] 浏览器通知显示失败（${error}），改用原生 Toast 兜底: ${rec.item.title}`)
-      sendNativeNow(rec.item, rec.click, 'show-error', true)
+      sendNativeNow(rec.item, rec.click, 'show-error')
       return
     }
     rec.acked = true
@@ -1050,7 +1054,7 @@ export function apply(ctx, config) {
       const chunks = []
       req.on('data', (chunk) => {
         size += chunk.length
-        if (size > limit) { req.destroy(); resolve(null); return }
+        // 超限：**不要 destroy** —— 那会连带销毁 socket，调用方的 4xx 响应送不回去，
         chunks.push(chunk)
       })
       req.on('end', () => {
@@ -1133,6 +1137,12 @@ export function apply(ctx, config) {
       // 线格式：新链接用 raw=<wire>；旧链接用 target=<wire>（0.1.x 时代发出、可能还在
       // 通知中心里）——两者都按同一套严格解码处理，非法即忽略。
       const raw = url.searchParams.get('raw') || url.searchParams.get('target') || ''
+      // 令牌不匹配（旧通知/上一次运行）：只允许站内目标，不允许走外部地址 —— 否则
+      // loopback 端点就成了人人可用的开放重定向（Sec-Fetch-Site 挡不住 DNS rebinding）。
+      if (token !== CLICK_TOKEN && /^url:/i.test(raw)) {
+        log('[dsh-desktop-notify] /click 令牌不匹配且目标是外部地址，已拒绝')
+        res.writeHead(403); res.end('forbidden'); return
+      }
       const target = decodeClickTarget(raw)
       if (target === null) {
         log(`[dsh-desktop-notify] 点击目标非法，已忽略: ${raw}`)
@@ -1172,6 +1182,12 @@ export function apply(ctx, config) {
     if (path === 'activate' && method === 'GET') {
       const site = String(req.headers['sec-fetch-site'] || '').toLowerCase()
       if (site === 'cross-site') { res.writeHead(403); res.end('forbidden'); return }
+      // 令牌校验（与 /click 同款）：Sec-Fetch-Site 挡不住 DNS rebinding（攻击页 same-origin），
+      // 而生成端每条 URL 都带 ?t=，Windows 转发器与 Linux 进程内调用也都带 → 零功能回归。
+      if ((url.searchParams.get('t') || '') !== CLICK_TOKEN) {
+        log('[dsh-desktop-notify] /activate 令牌不匹配，已拒绝')
+        res.writeHead(403); res.end('forbidden'); return
+      }
       const raw = url.searchParams.get('raw') || ''
       log(`[dsh-desktop-notify] activate raw=${JSON.stringify(raw)} site=${site || '-'}`)
       const target = decodeClickTarget(raw)
@@ -1471,6 +1487,9 @@ export function apply(ctx, config) {
         })
       },
     })
+    // 路由挂上了才算接管成功：注册失败时保持 routeReady=false，让旧实例继续负责。
+    routeReady = true
+    publishConfig()
     ctx.effect(() => () => {
       for (const [res, meta] of [...openStreams]) {
         if (meta && typeof meta.stopPing === 'function') meta.stopPing()
@@ -1481,7 +1500,9 @@ export function apply(ctx, config) {
     })
     log('[dsh-desktop-notify] /dnotify 路由已挂载（聚焦上报 + 点击投递）')
   } catch (e) {
-    console.error('[dsh-desktop-notify] /dnotify 路由挂载失败（通知仍可用，但会话级静默与点击跳转会失效）:', e && e.message)
+    // 注册失败 = 同进程已有旧实例持有路由：**不接管**（否则事件会落到本实例空白的
+    // openStreams 上，导致全部走原生、点击也投不出去），并在日志里明确升级。
+    console.error('[dsh-desktop-notify] /dnotify 路由挂载失败：本实例不接管（由旧实例继续服务）:', e && e.message)
   }
 
   // ---- 点击激活：把自定义协议指向**本进程**的激活端点 ----

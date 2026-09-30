@@ -9,7 +9,7 @@
  *
  * 一切失败都吞掉：日志写不出去**绝不能**影响通知本身。
  */
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -43,6 +43,8 @@ export function createFileSink(options: FileSinkOptions): (line: string) => void
     ready = true
   }
   const rotate = (): void => {
+    // 先把最旧的一份删掉：否则 at(keep-1) 会被改名成 at(keep)，磁盘上多留一份
+    try { rmSync(at(keep), { force: true }) } catch (e) { /* ignore */ }
     for (let i = keep - 1; i >= 1; i -= 1) {
       try { if (existsSync(at(i))) renameSync(at(i), at(i + 1)) } catch (e) { /* ignore */ }
     }
