@@ -158,11 +158,14 @@ export function registerAumid() {
     const hkey = createKey(HKEY_CURRENT_USER, AUMID_SUBKEY)
     if (!hkey) throw new Error('RegCreateKeyExW failed')
     try {
-      setString(hkey, 'DisplayName', APP_ID)
+      // 通知来源那一行显示的**就是**这个 DisplayName（Windows 通知中心里的"应用名"）。
+      // AUMID 本身仍是 DSH（改它会丢掉已发出通知的归属），只把显示名换成产品名。
+      const displayName = 'DeepSeek Harness'
+      setString(hkey, 'DisplayName', displayName)
       if (icon) setString(hkey, 'IconUri', icon)
       // 读回自校验：写不进去（权限/策略）时不谎报成功
       const got = getString(hkey, 'DisplayName')
-      if (got !== APP_ID) throw new Error(`DisplayName read-back mismatch: ${JSON.stringify(got)}`)
+      if (got !== displayName) throw new Error(`DisplayName read-back mismatch: ${JSON.stringify(got)}`)
       aumidState = { ok: true, displayName: got, iconUri: icon }
     } finally {
       closeKey(hkey)

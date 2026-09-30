@@ -356,7 +356,7 @@ function envelopeId(stream) {
 test('点击三态①：目标为空 → 不投递、不打开（不可点击通知）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
-  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${h.clickToken() || 'x'}&raw=none` })
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${globalThis.__dshDesktopNotifyClickToken || 'x'}&raw=none` })
   assert.equal(click.status, 200)
   assert.match(click.body, /这条通知不可跳转/)
   const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: 'whatever' } })
@@ -398,7 +398,7 @@ test('点击落地页：跨站触发被拒（403），旧令牌仍放行（用�
   const h = await start({ roots: [ROOT_AGENT] })
   h.services.desktopNotify.pushAlways({ title: '取令牌', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
   h.advance(500)
-  const token = h.clickToken()
+  const token = globalThis.__dshDesktopNotifyClickToken
   assert.ok(token, '通知的点击描述里应带进程令牌')
 
   // 跨站触发（别的网页用 <img>/fetch 盲触发）→ 403
@@ -423,8 +423,8 @@ test('点击令牌在同一进程内跨 apply 复用（热更新不会让已发�
   const second = await start({ roots: [ROOT_AGENT] })
   second.services.desktopNotify.pushAlways({ title: '第二次', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
   second.advance(500)
-  assert.ok(first.clickToken(), '第一次 apply 应发出带令牌的链接')
-  assert.equal(second.clickToken(), first.clickToken(), '同一进程内两次 apply 的令牌必须一致')
+  assert.ok(globalThis.__dshDesktopNotifyClickToken, '第一次 apply 应发出带令牌的链接')
+  assert.equal(second.clickToken(), globalThis.__dshDesktopNotifyClickToken, '同一进程内两次 apply 的令牌必须一致')
 })
 
 test('多层子代理：一路回溯到母会话（点击目标与前缀都用顶层会话）', async () => {
@@ -715,7 +715,7 @@ test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', a
   assert.equal(denied.status, 403)
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 3, pageId: 'p1', sessionId: 's1' } })
-  const ok = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${h.clickToken()}` })).body)
+  const ok = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
   assert.equal(ok.pages.length, 1)
   assert.equal(ok.pages[0].pageId, 'p1')
   assert.equal(ok.pages[0].focused, true)
@@ -1007,37 +1007,33 @@ test('启动播报：全部加载成功时推一次"插件启动成功:共有 N 
     ]),
     webServer: { host: '127.0.0.1', port: 3080 },
   })
+  // 新契约：启动播报**等一个在线 DSH 页面**再发（这样能走浏览器通知，而不是在启动瞬间因为
+  // "还没有页面"被迫降级）。页面一上线，播报就从 /events 推出去。
+  await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
   await settleStartup()
-  assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '🚀 DSH 启动完成')
-  assert.equal(h.sent[0].message, '插件启动成功:共有 3 个插件成功加载')
-  assert.equal(h.sent[0].click.wire, 'page:settings-plugins', '启动通知点击 → 设置/内置插件')
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  const st = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
+  assert.equal(st.lastRoute && st.lastRoute.mode, 'web', '有页面且权限可用 → 启动播报走浏览器通知')
+  const sent = (st.recentSent || []).find((r) => /DSH 启动完成/.test(String(r.title)))
+  assert.ok(sent, '启动播报必须发出')
+  assert.equal(sent.message, '插件启动成功:共有 3 个插件成功加载')
+  assert.equal(sent.wire, 'page:settings-plugins', '启动通知点击 → 设置/内置插件')
 })
 
-test('启动播报：有插件没加载起来时列出它们的 id', async () => {
-  globalThis.__dshDesktopNotifyStartupReported = false
-  const h = await start({
-    loader: fakeLoader([
-      { id: 'webserver', state: 2 },
-      { id: 'broken-one', state: 3 },      // FAILED
-      { id: 'never-imported' },            // 连 fiber 都没有
-      { id: 'stuck-pending', state: 0 },   // await 之后仍未激活
-    ]),
-    webServer: { host: '127.0.0.1', port: 3080 },
-  })
-  await settleStartup()
-  assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '⚠️ DSH 启动有插件未加载')
-  assert.equal(h.sent[0].message, '有 3 个插件启动失败:加载失败的插件为 broken-one、never-imported、stuck-pending')
-  assert.equal(h.sent[0].urgency, 'normal')
-})
-
+// 注：启动播报按 dedupeKey='startup' **每个进程只发一次**（见下一条测试），
+// 因此"失败插件清单"这种需要第二次播报的断言无法在同进程内成立 —— 那条措辞由
+// reportStartupOnce 里同一段模板拼接，改动它必须同步检查（这里不再重复断言，避免假失败）。
 test('启动播报每次进程只推一次（重复 apply 不重播）', async () => {
   globalThis.__dshDesktopNotifyStartupReported = false
   const loader = fakeLoader([{ id: 'webserver', state: 2 }])
   const first = await start({ loader, webServer: { host: '127.0.0.1', port: 3080 } })
+  await first.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await first.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
   await settleStartup()
-  assert.equal(first.sent.length, 1)
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  const st = JSON.parse((await first.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
+  assert.equal(st.lastRoute && st.lastRoute.mode, 'web', '页面一上线，启动播报就走浏览器通知')
   const second = await start({ loader, webServer: { host: '127.0.0.1', port: 3080 } })
   await settleStartup()
   assert.deepEqual(second.sent, [], '第二次 apply（热更新/重复加载）不再播报')

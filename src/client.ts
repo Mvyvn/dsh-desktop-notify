@@ -552,8 +552,6 @@
         title: String(envelope.title || 'DSH 通知'),
         body: String(envelope.body || '点击查看'),
         tag: String(envelope.tag || ('dsh-' + String(envelope.id || Date.now()))),
-        // 图标走宿主路由（按主题返回 PNG；Web Notification 不认 .ico）
-        icon: String(location.origin + ROUTE_PREFIX + '/icon.png'),
         pageId: getPageId(),
         target: String(envelope.target || ''),
         deepLink: String(envelope.deepLink || ''),

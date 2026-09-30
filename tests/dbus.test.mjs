@@ -57,7 +57,7 @@ test('method_call 头部是小端且字段齐全', () => {
   assert.equal(msg.signature, NOTIFY_SIGNATURE)
   // body 解出来必须和方法体逐字段一致
   const decoded = new Reader(msg.body)
-  assert.equal(decoded.str(), 'DSH')
+  assert.equal(decoded.str(), 'DeepSeek Harness')
 })
 
 test('无 body 的调用不写 SIGNATURE 字段（Hello）', () => {
@@ -84,7 +84,7 @@ test('方法体字段与 Notify 签名一致', () => {
     serial: 1,
   })
   const decoded = decodeNotifyBody(decodeMessage(frame).body)
-  assert.equal(decoded.appName, 'DSH')
+  assert.equal(decoded.appName, 'DeepSeek Harness')
   assert.equal(decoded.replacesId, 0)
   assert.equal(decoded.appIcon, ICON)
   assert.equal(decoded.summary, '✅ 任务完成')
