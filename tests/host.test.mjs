@@ -862,21 +862,24 @@ test('jobs：0.1.7 的 events.subscribe(settled) 触发后台任务通知，awai
 
   // 非 settled 事件不通知
   listeners[0].listener({ type: 'progress', job: { id: 'j1', label: '构建', status: 'running' } })
-  // 已被等待方收走的结算不通知
+  // 新契约：awaited=true 也通知 —— 实测母会话的后台任务结算时 awaited 就是 true，
+  // 用户仍要被告知"后台任务结束了"；"你正看着这个会话"这种打扰交给聚焦门控。
   listeners[0].listener({ type: 'settled', awaited: true, cause: 'producer', job: { id: 'j1', label: '构建', status: 'completed' } })
   h.advance(500)
-  assert.deepEqual(h.sent, [])
+  assert.equal(h.sent.length, 1, 'awaited 的后台任务结算也要通知')
+  assert.match(String(h.sent[0].message), /构建已完成/)
 
   listeners[0].listener({ type: 'settled', awaited: false, cause: 'producer', job: { id: 'j2', label: '构建', status: 'completed' } })
   listeners[0].listener({ type: 'settled', awaited: false, cause: 'kill', job: { id: 'j3', label: '测试', status: 'killed' } })
   listeners[0].listener({ type: 'settled', awaited: false, cause: 'producer', job: { id: 'j4', label: '部署', status: 'failed', owner: 's1' } })
   h.advance(1000)
-  assert.equal(h.sent.length, 3)
+  assert.equal(h.sent.length, 4)
   assert.equal(h.sent[0].title, '🧰 后台任务结束')
   assert.match(h.sent[0].message, /构建已完成/)
-  assert.match(h.sent[1].message, /测试被终止/)
-  assert.match(h.sent[2].message, /部署失败/)
-  assert.equal(h.sent[2].urgency, 'normal', '失败的任务用 normal 提醒')
+  assert.match(h.sent[1].message, /构建已完成/)
+  assert.match(h.sent[2].message, /测试被终止/)
+  assert.match(h.sent[3].message, /部署失败/)
+  assert.equal(h.sent[3].urgency, 'normal', '失败的任务用 normal 提醒')
 })
 
 test('jobs 服务没有 events 时只记日志，不影响其它通知', async () => {
@@ -956,12 +959,12 @@ test('jobs：kind=subagent 的 job 不再重复通知（subagent/end 已经报�
     jobs: { events: { subscribe: (filter, listener) => { listeners.push(listener); return () => {} } } },
     effect: (fn) => { fn(); return () => {} },
   })
-  // 后台一次性子代理：tool-subagent 用 jobs.start({ kind: 'subagent' }) 注册，
-  // 同一个 run 还会派发 subagent/end——两边都通知就是两条 toast。
+  // 子代理后台任务由 subagent/end 那条通知负责（🤖 后台子代理结束）：这里跳过，避免同一件事两条。
+  // 两种后台任务**都会**提醒，只是各走各的通知。
   listeners[0]({ type: 'settled', awaited: false, cause: 'producer', job: { id: 'subagent-1', kind: 'subagent', label: '重构 auth 模块', status: 'completed', owner: 's1' } })
   h.advance(500)
-  assert.deepEqual(h.sent, [])
-  // 其它 kind 照常通知
+  assert.deepEqual(h.sent, [], '子代理后台任务不在这一路重复通知')
+  // 母会话的后台任务（kind 不是 subagent）照常通知
   listeners[0]({ type: 'settled', awaited: false, cause: 'producer', job: { id: 'bash-1', kind: 'bash', label: 'npm test', status: 'completed' } })
   h.advance(500)
   assert.equal(h.sent.length, 1)

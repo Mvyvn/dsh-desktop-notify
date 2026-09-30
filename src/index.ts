@@ -1286,8 +1286,10 @@ export function apply(ctx, config) {
       if (type === 'compaction/end') {
         if (data.error) return
         const root = rootSessionIdOf(session)
+        // 静默范围只认**这个会话本身**：哪怕你正看着它的母会话或子代理，这条也要推。
+        // 点击目标仍指母会话（可用性），与静默判定分开。
         notify('🗜️ 上下文已智能压缩', withPrefix(sessionTitleText(root || session), root || session, '上下文已智能压缩'),
-          'low', [root || session], { dedupeKey: 'compact:' + String(data.compactionId || ''), click: clickForSession(root || session) })
+          'low', [session], { dedupeKey: 'compact:' + String(data.compactionId || ''), click: clickForSession(root || session) })
         return
       }
 
@@ -1334,9 +1336,12 @@ export function apply(ctx, config) {
         state.asksById.delete(id)
         // 0.1.7 的 outcome 词表：'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
         if (info && data.outcome === 'rejected') {
+          // 静默范围 = **被拒的那个会话本身**（子代理里被拒时，你看着母会话也要推）；
+          // 点击目标才归一到母会话（子会话 id 客户端目录里没有 → 点了不跳）。
+          const deniedRoot = rootSessionIdOf(session) || session
           notify('🚫 操作被自动拒绝',
-            withPrefix(sessionTitleText(session), session, ((info as any).tool || '工具') + '-' + ((info as any).reason || '操作被自动拒绝')),
-            'normal', session, { dedupeKey: 'approval:' + id, click: clickForSession(session) })
+            withPrefix(sessionTitleText(deniedRoot), deniedRoot, ((info as any).tool || '工具') + '-' + ((info as any).reason || '操作被自动拒绝')),
+            'normal', [session], { dedupeKey: 'approval:' + id, click: clickForSession(deniedRoot) })
         }
       }
     } catch (e) {
@@ -1395,9 +1400,12 @@ export function apply(ctx, config) {
         const h = typeof first.header === 'string' ? first.header : ''
         const session = exec.agent && exec.agent.session
         if (session && session.id !== undefined) rememberAskAt(String(session.id))
+        // 静默范围 = **发出提问的那个会话本身**（子代理提问时，你看着母会话也要推）；
+        // 点击目标才归一到母会话（子会话 id 客户端目录里未必解析得到 → 点了不跳）。
+        const askRoot = rootSessionIdOf(session) || session
         notify('❓ DSH 等待你的输入',
-          withPrefix(sessionTitleText(session), session, (h ? '[' + h + '] ' : '') + q),
-          'normal', session, { dedupeKey: exec.callId ? 'ask:' + exec.callId : '', click: clickForSession(session) })
+          withPrefix(sessionTitleText(askRoot), askRoot, (h ? '[' + h + '] ' : '') + q),
+          'normal', [session], { dedupeKey: exec.callId ? 'ask:' + exec.callId : '', click: clickForSession(askRoot) })
       }
     } catch (e) {
       console.error('[dsh-desktop-notify] ask hook error:', e && e.message)
@@ -1453,15 +1461,65 @@ export function apply(ctx, config) {
 
   // ---- 定时任务：DSH 侧的对外广播 ----
   // schedule 服务只发一个**无载荷**的 Cordis 事件 `schedule/changed`（见 DSH 的
-  // packages/schedule/schedule/src/index.ts: emit('schedule/changed')）；会话事件
-  // `schedule/change` 只在创建/删除时写进会话日志，未必以 session/event 广播出来。
-  // 先记一条：下次测试就能确定"是这条 Cordis 事件到、还是两者都不到"。
-  ctx.on('schedule/changed', () => {
-    pushRing(scheduleLog, { at: Date.now(), event: 'schedule/changed' })
-    log('[dsh-desktop-notify] 收到 schedule/changed（无载荷）')
+  // packages/schedule/schedule/src/index.ts: emit('schedule/changed')）。实测：这条事件**到得了**
+  // 插件（scheduleLog 里看得到），而会话事件 `schedule/change` 从不出现在 session/event 里
+  // （eventLog 里一次都没有）—— 原来那段监听会话事件的分支是**死代码**，所以"定时任务已启动"
+  // 一直发不出来。
+  // 现在的做法：事件到达 → 读一次 catalog()（全局列表）→ 与上次快照比对 → 新增的才算"已启动"。
+  ctx.inject(['schedule'], (sCtx) => {
+    const svc = sCtx.schedule
+    if (!svc || typeof svc.catalog !== 'function') {
+      log('[dsh-desktop-notify] schedule 服务没有 catalog()，跳过定时任务通知')
+      return
+    }
+    log('[dsh-desktop-notify] schedule service: hooked')
+    // 快照的价值：id → 最近一次投递（lastDelivery）的序列化。提醒要的是"**触发了**"，
+    // 不是"创建了" —— 所以只在某个任务的投递记录**发生变化**时才推。
+    let known: Map<string, string> | null = null
+    const deliveryKeyOf = (entry: any): string => {
+      try { return JSON.stringify((entry && entry.lastDelivery) || null) } catch (e) { return 'null' }
+    }
+    const sync = async (announce: boolean): Promise<void> => {
+      let list: any[] = []
+      try {
+        list = await svc.catalog()
+      } catch (e) {
+        pushRing(scheduleLog, { at: Date.now(), event: 'catalog-error', message: String((e && e.message) || e) })
+        return
+      }
+      const seen = new Map<string, string>()
+      for (const entry of list) {
+        const id = String((entry && entry.id) || '')
+        if (!id) continue
+        const delivery = deliveryKeyOf(entry)
+        seen.set(id, delivery)
+        if (!announce || !known) continue
+        const prev = known.get(id)
+        if (prev === undefined) continue            // 本次才第一次见到 → 是"创建"，不推
+        if (prev === delivery) continue             // 没有新的投递
+        if (delivery === 'null') continue           // 投递记录被清掉，不算触发
+        const session = entry.sessionId ? String(entry.sessionId) : ''
+        const root = rootSessionIdOf(session) || session
+        const what = truncateText(String(entry.title || entry.prompt || id).replace(/\s+/g, ' ').trim(), 160)
+        pushRing(scheduleLog, { at: Date.now(), event: 'delivered', id })
+        // 静默范围 = 这个定时任务所属会话本身；点击目标才归一到母会话（可用性）
+        notify('⏰ 定时任务已启动', withPrefix(sessionTitleText(root), root, what),
+          'low', [session], { dedupeKey: 'schedule:' + id + ':' + delivery, click: clickForSession(root) })
+      }
+      known = seen
+    }
+    void sync(false)   // 首次只建快照：不把历史投递补报一遍
+    ctx.on('schedule/changed', () => {
+      pushRing(scheduleLog, { at: Date.now(), event: 'schedule/changed' })
+      void sync(true)
+    })
   })
 
   // ---- 后台任务（jobs）结束 ----
+  // 只要是"后台任务"，无论它属于子代理还是母会话，用户都想被提醒 —— 所以这里**不按 kind 跳过**。
+  // 与 `subagent/end`（🤖 后台子代理结束）撞车的风险，用**共用去重键**解决：
+  // 后台子代理任务是 kind='subagent' 的 job，其 job.id 即子代理 runId，两边都用
+  // 'subagent:<id>' 作为 dedupeKey，于是同一件事只会弹一条（先到的赢，后来的被去重窗口吃掉）。
   // jobs 是可选服务：不能写进 export const inject（无 jobs 的组合会让整个插件不加载），
   // 也不能只在 apply 里 ctx.get 一次——cordis 对未 inject 的服务不会重跑 apply，
   // 晚挂载的 jobs 会让钩子永不注册（「后台任务结束」通知静默失效）。
@@ -1496,11 +1554,10 @@ export function apply(ctx, config) {
         })
         if (!event || event.type !== 'settled') return
         const job = event.job || {}
-        // awaited = 有调用方在等这次结算，结果已经交给它了（旧的 reported 语义）
-        if (event.awaited) return
-        // 后台子代理同时也是 kind='subagent' 的 job（tool-subagent 里 jobs.start 注册），
-        // 它已经由 subagent/end 通知过一次——这里再报就是两条 toast。
-        if (job.kind === 'subagent') return
+        // 后台子代理任务（kind='subagent'）由 `subagent/end` 那条通知负责（🤖 后台子代理结束），
+        // 这里跳过以免同一件事弹两条 —— 两种后台任务**都会**提醒，只是各自的标题不同。
+        // （不去靠"共用去重键"合并：两条的标题/正文不同，去重键的组成里含标题正文，合不掉。）
+        if (String(job.kind || '') === 'subagent') return
         const jobSession = job.owner   // SessionId | undefined
         // owner 可能是**子代理会话**（子代理派生的后台任务）：一路回溯到母会话，
         // 否则点击会因为客户端目录里没有这个子会话而"点了不跳"。
@@ -1510,11 +1567,13 @@ export function apply(ctx, config) {
         const status = String(job.status || '')
         const suffix = status === 'failed' ? '失败' : status === 'killed' ? '被终止' : '已完成'
         log(`[dsh-desktop-notify] job settled ${job.id} label=${job.label} status=${status} cause=${event.cause} owner=${jobSession || '-'} root=${jobRoot || '-'}`)
+        // 去重键带 job.id：同名任务在同一窗口内结算也要各自弹（不再靠 kind 合并）
+        const dedupeKey = 'job:' + String(job.id || '')
         notify('🧰 后台任务结束',
           withPrefix(mainTitle, jobRoot || jobSession, label + suffix),
           status === 'failed' ? 'normal' : 'low',
           [jobRoot, jobSession].filter((v) => !!v), // 取不到会话归属时 notify 不静默（照常推送）
-          { dedupeKey: 'job:' + String(job.id || ''), click: clickForSession(jobRoot || jobSession) })   // 同名任务在同一窗口内结算也要各自弹
+          { dedupeKey, click: clickForSession(jobRoot || jobSession) })
       } catch (e) { /* ignore */ }
     }))
   })
