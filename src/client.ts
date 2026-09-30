@@ -960,12 +960,21 @@
             return forms && typeof forms.get === 'function' ? forms.get(SETTINGS_NS) : null
           } catch (e) { return null }
         }
+        /** 身份比较：get() 可能每次返回新的包装对象，用稳定信号判断是否同一个 form。 */
+        function sameForm(a: any, b: any): boolean {
+          if (a === b) return true
+          if (!a || !b) return false
+          var ka = a.namespace || a.id || a.name
+          var kb = b.namespace || b.id || b.name
+          return !!ka && ka === kb
+        }
         React.useEffect(function () {
           var disposed = false
           function resolve() {
             if (disposed) return
             var next = resolveForm()
-            setForm(function (prev: any) { return prev === next ? prev : next })
+            // **身份检测**：身份没变就不动 state（避免每次渲染都重订阅）
+            setForm(function (prev: any) { return sameForm(prev, next) ? prev : next })
           }
           resolve()
           var off: any = null
@@ -973,24 +982,46 @@
             // configForms 服务本身可能晚到：服务一出现就再解一次（不是轮询）
             if (ctx.inject) off = ctx.inject(['configForms'], function () { resolve() })
           } catch (e) { /* ignore */ }
+          var offVolatile: any = null
+          try {
+            // 该行发生 volatile 更新时也重解一次：极端情况下 Form 会被换成新对象
+            if (ctx.on) offVolatile = ctx.on('loader/volatile-update', function () { resolve() })
+          } catch (e) { /* ignore */ }
           return function () {
             disposed = true
             try { if (typeof off === 'function') off() } catch (e) { /* ignore */ }
+            try { if (typeof offVolatile === 'function') offVolatile() } catch (e) { /* ignore */ }
           }
         }, [])
         return form
       }
-      /** 订阅**当前** form；form 换实例时自动解绑旧的再绑新的。 */
+      /**
+       * 订阅**当前** form，并显式做身份检测：
+       *   · 身份未变 → 不重绑（避免无谓的 unsubscribe/subscribe 抖动）
+       *   · 身份变了（换实例 / 变成 null）→ **先解绑旧的，再绑新的**
+       * 防御场景：client fiber 保留、service 或 Form 被替换 —— React state 还在，
+       * 但旧订阅已经失效，不重绑就会永远读不到新配置。
+       */
       function useSnapshot(form: any): any {
         var pair = React.useState(null)
         var snap = pair[0]
         var setSnap = pair[1]
+        var boundRef = React.useRef(null)
         React.useEffect(function () {
+          var bound = boundRef.current
+          if (bound === form) return undefined              // 身份未变：不重绑
+          if (bound && typeof bound.unsubscribe === 'function') {
+            try { bound.unsubscribe() } catch (e) { /* ignore */ }
+          }
+          boundRef.current = form
           if (!form || typeof form.subscribe !== 'function') { setSnap(null); return undefined }
           function read() { try { setSnap(form.getSnapshot()) } catch (e) { /* ignore */ } }
           read()
           var off = form.subscribe(read)
-          return function () { try { if (typeof off === 'function') off() } catch (e) { /* ignore */ } }
+          return function () {
+            try { if (typeof off === 'function') off() } catch (e) { /* ignore */ }
+            if (boundRef.current === form) boundRef.current = null
+          }
         }, [form])
         return snap
       }
