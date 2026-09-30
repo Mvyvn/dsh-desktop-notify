@@ -1,77 +1,74 @@
 # DSH 桌面通知（dsh-desktop-notify）
 
-为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载（无需审批）。当前适配 **DSH 0.1.7-rc.2 与 0.2.0-rc.2**（两个版本之间本插件依赖的服务面——`connection` / `webServer` / `jobs` / `subagent` / `scope` / `loader` / cordis——零改动，已实测）；包内声明 `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.2 <0.3.0" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合。
+为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载（无需审批）。
+
+## 依赖需求
+
+| 项 | 要求 |
+| --- | --- |
+| **DSH** | **`>= 0.1.7-rc.2` 且 `<= 0.2.0-rc.2`**（**只承诺实测过的这条线**；0.2.x 的其它小版本可能有破坏性改动，不预先声称兼容。两个版本之间本插件依赖的服务面——`connection` / `webServer` / `jobs` / `subagent` / `schedule` / `scope` / `loader` / cordis——零改动） |
+| 包内声明 | `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.2 <=0.2.0-rc.2" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合（含更新的 0.2.x） |
+| 运行时 | Windows 需要 [koffi](https://koffi.dev/)（发 WinRT Toast，安装脚本会处理）；Linux 无额外依赖（纯 JS 直说 D-Bus） |
+| 浏览器 | Firefox / Chromium 系（Web Notification 路线依赖 Service Worker 与 `WindowClient.focus()`，见下） |
+
+## 能力
 
 - **任务完成**：agent 干完活回到空闲时，弹「✅ DSH 任务完成」+「工作区/会话名:结尾输出内容」
 - **等待你回答**：AI 发起 `ask_user_question` 提问时，弹「❓ DSH 等待你的输入」提醒你回来
-- **审批被自动拒绝**：`never` 审批政策下操作被静默拒绝时，弹「🚫 操作被自动拒绝」告知
+- **审批被自动拒绝**：`never` 审批政策下操作被静默拒绝时，弹「🚫 DSH 操作被自动拒绝」告知
 - **后台任务结束**：后台子代理 / 目标完成或卡住 / 后台命令任务结束时逐一提醒
-- **启动播报**：每次 `dsh web` 启动后推一条「插件启动成功:共有 N 个插件成功加载」；有插件没激活时改为列出它们的 id 与数量。每次启动只推一次
-- **点击跳转**：会话类通知点击跳回对应会话，启动播报点击打开「插件」面板；没有跳转目标的通知点了只会消失
-- **防打扰**：**只静默"你正在看的那个会话"**——页面聚焦且其中当前选中的正是这条通知所属会话时才不弹；切到别的窗口/标签、最小化，或者你正在看别的会话（多会话/多工作区并行），提醒照常推送
-- **DSH图标**：Toast 右下角与应用身份图标均为 DSH Logo（透明底 PNG/ICO），非系统默认图标；**深浅两套**（深色主题白鱼 / 浅色主题黑鱼）按系统主题自动切换
-- **原生直连发送**：Windows 用 [koffi](https://koffi.dev/) 直调 WinRT 发 Toast，Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程、无冷启动**（点击跳转在 Linux 上走 xdg-desktop-portal 的 OpenURI，同样不起子进程）
-
-## 截图
-
-| 任务完成 | 等待输入 | 审批被拒 |
-| :---: | :---: | :---: |
-| ![notify-task-done](screenshots/notify-task-done.png) | ![notify-question](screenshots/notify-question.png) | ![notify-denied](screenshots/notify-denied.png) |
-
-| 子代理结束 | 目标完成/卡住 | 后台任务结束 |
-| :---: | :---: | :---: |
-| ![notify-subagent](screenshots/notify-subagent.png) | ![notify-goal](screenshots/notify-goal.png) | ![notify-job](screenshots/notify-job.png) |
+- **定时任务触发**：定时任务**真正被投递（触发）时**提醒；只创建、还没触发时不打扰
+- **启动播报**：每次 `dsh web` 启动后推一条「🚀 DSH 插件挂载成功」（正文 `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`）；有插件异常时标题改为「⚠️ DSH 插件挂载异常」、正文列出数量与 id。每次启动只推一次
+- **点击跳转**：会话类与页面类通知点击后跳回对应位置；没有跳转目标的通知点了只会消失
+- **两种通知渠道**：有在线 DSH 页面且浏览器已授权时走 **Web Notification**（点击由浏览器自己精确激活标签页，零中转页）；否则降级为**原生 Toast**（点击新开标签页跳 DSH 深链，正文会标注「降级模式」）
+- **标题一律带 `DSH` 前缀**：通知的图标与来源行由"谁发的通知"决定（Web Notification 显示浏览器身份，无法修改），所以品牌位落在标题上——每条通知标题都是「emoji + DSH + 内容」
+- **权限变更即时通知**：标题「⚠️ DSH 权限变更」，正文 `dsh-desktop-notify 跟踪到消息提醒权限变更为:xxx，插件运行模式同步变更为xxx`（`xxx` 为 `granted`/`denied`/`default` 与 `正常`/`降级`）；不受聚焦门控静默，重复回报同一状态不打扰
+- **DSH 图标**：原生 Toast 的图标与应用身份均用 DSH Logo（透明底 PNG/ICO），深浅两套按系统主题自动切换
+- **原生直连发送**：Windows 用 koffi 直调 WinRT，Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程**
 
 ## 安装
 
+**走 DSH 自带的插件安装器，不要用 shell 脚本手工往 profile 里拷** —— 依赖安装、bundle 选择、启用都由安装器负责（官方文档明确要求不要用 shell 复刻这些步骤）。
+
 前置条件：**已启动过一次 `dsh web`**（需已生成 web profile）。不需要 Python、不需要 pip。
 
-```powershell
-# Windows
-git clone https://github.com/Mvyvn/dsh-desktop-notify.git
-cd dsh-desktop-notify
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1
-```
+1. 取到插件目录：`git clone https://github.com/Mvyvn/dsh-desktop-notify.git`（也可以直接在 DSH 里填这个仓库地址）。
+2. 在 DSH 里打开**插件管理** → **「添加插件」**，安装目标填：**本机插件目录的实际路径**（推荐，离线可用）或 **GitHub 仓库地址**。
+3. 安装器会装好运行时依赖（`koffi`，已在 `dependencies` 里声明）、把本包选为 profile bundle 并启用；若它报告有待批准的安装脚本，按提示确认即可。
+4. **完全重启 `dsh web`**（结束进程重开，不是刷新页面），并**刷新一次 DSH 页面**。
 
-```bash
-# Linux（KDE / GNOME 等桌面会话，走 D-Bus 原生通知）
-git clone https://github.com/Mvyvn/dsh-desktop-notify.git
-cd dsh-desktop-notify
-bash scripts/install.sh
-```
+包清单本身就是一份合规 bundle：`dsh.bundle.patch` 指向 `cordis.patch.yml`（挂载宿主半区那一行），`dsh.client` 声明浏览器半区，`koffi` 是普通 `dependencies`。AUMID `DSH` 注册表键由**插件自己**在启动时按当前系统主题写好（`DisplayName` 固定为 **DeepSeek Harness**），不依赖任何安装脚本。
 
-脚本会把插件装入 `$DSH_HOME/profiles/web/node_modules/dsh-desktop-notify/`（`$DSH_HOME` 默认 `~/.dsh`），并把包名登记进 web profile 的 `dsh.profile.bundles`——**不写 `dependencies`**：npm 上有个同名的**另一个**插件（与本仓库、与本项目无关），写进 `dependencies` 会让任何一次 `npm install` 去 registry 拉那一个、把本地这份覆盖掉；代价是该 profile 里跑 `npm install` 会把这套手动安装的文件当 extraneous 清掉（重跑脚本即可恢复）。Windows 脚本还会：先确保运行时依赖 `koffi` 在 profile 中可用（缺失时 `npm install koffi`，装不上则从本仓库 `node_modules` 拷贝；**先装依赖再拷插件**，否则 npm 会把刚拷进去的插件清掉），并按**当前系统主题**写好 AUMID `DSH` 注册表键（Toast 顶部的程序应用图标来源；插件之后会随主题切换自动改写）。之后**完全重启 `dsh web`**（结束进程重开，不是刷新页面）。
+> ⚠️ 别用 `pnpm add dsh-desktop-notify` / `npm install dsh-desktop-notify`：npm 上有个**同名但无关**的插件，会装错。按上面填**本机目录路径**或本仓库地址即可。
 
-验证：切到别的窗口，让 agent 跑一个小任务，完成后应弹出系统通知；**停在你正在看的那个会话**里则不弹——但如果你切去别的会话（或别的标签），它的提醒会照常弹（聚焦静止 2 分钟视为失焦，恢复提醒）。也可以直接跑冒烟测试：
+### 首次使用：授予通知权限（走 Web Notification 路线时必需）
 
-```powershell
-node scripts/winrt-probe.mjs    # Windows：注册 AUMID（按当前主题选图标）+ 发一条真实 Toast
-node scripts/theme-probe.mjs    # Windows/Linux：模式检查 + 切换事件跟踪自检（不改系统主题）
-node scripts/dsh-runtime-probe.mjs   # 把宿主半区挂进 DSH 自带的 cordis 跑一遍契约自检（不发真实通知）
-```
+浏览器要求**用户手势**才弹授权框，所以插件不做自动弹窗，而是在 DSH 页面里显示一个一次性的居中提示：
 
-```bash
-# Linux：发一条通知（桌面会话里执行；纯 SSH/无桌面会话不会弹）
-node --input-type=module -e "import('./lib/toast-linux.js').then(m => m.sendToast({ title: 'DSH 通知测试', message: 'D-Bus 直连可用' }))"
-```
+> **开启桌面通知**（DSH 界面风格的模态卡片：遮罩 + 卡片 + 标题 + 说明 + 右下角按钮；高 32px、圆角 8px 的按钮，外观逐项对齐 DSH 自己的弹窗（`ui-primitives/Modal`）：背景 `--dsw-alias-bg-layer-2`、遮罩 `--dsw-alias-bg-mask-1`、圆角 `--dsw-radius-panel`、投影 `--dsw-elevation-prominent`，这些 token 的值都是**解析成实际颜色后再写进内联样式**，避免卡片挂在 `body` 上取不到作用域 token 而在深色主题下变白板）
+>
+> 「设置」→ 弹浏览器授权框；「取消」→ 只关掉卡片、不弹授权框。**任一标签页关掉卡片，其它标签页的卡片会跟着关**（`BroadcastChannel`，老浏览器退 `localStorage` 事件）；每次显示前还会清掉可能残留的旧卡片。
+
+点「设置」后 → 浏览器授权框出现 → 允许。授权后通知由浏览器直接显示、点击可精确切回已有 DSH 标签页。**未授权**（或拒绝）时不会失败：自动降级为原生 Toast，点击新开标签页跳转，（运行模式只出现在**启动播报**的正文里：`，dsh-desktop-notify 运行模式：正常` 或 `…：降级`）。授权被拒后需要在浏览器站点设置里手动重开。
 
 ## 通知一览
 
-| 通知 | 触发钩子 | 静默判定用的会话 | 正文格式 |
+| 通知 | 触发 | 静默判定用的会话 | 正文格式 |
 | --- | --- | --- | --- |
 | ✅ 任务完成 | `agent/status` running→idle（仅根 agent，3 秒去抖） | 该 agent 的会话 | 工作区/会话名:结尾输出内容 |
-| ❓ 等待你回答 | `tools/execute` 捕获 `ask_user_question` 派发 | 发起提问的会话 | 工作区/会话名:[类型] 内容 |
-| 🚫 审批被自动拒绝 | `session/event` 流 `approval/asked`+`decided` 审计对 | 被拒操作所在会话 | 工作区/会话名:工具名-拒绝原因 |
-| 🤖 后台子代理结束 | `subagent/end` | 母会话或子会话 | 工作区/**母会话**名:子代理名已完成 |
-| 🎯 目标完成 / 阻塞 | `goal/changed` | 目标所属会话 | 工作区/会话名:目标-已完成 / 目标-阻塞原因 |
-| 🧰 后台任务结束 | `jobs.events` 的 `settled` 事件（0.1.7 起 `onJobDone` 已移除；`kind='subagent'` 的 job 由上一行负责，不重复弹） | owner 的**母会话**（取不到则不静默） | 工作区/母会话名:后台任务名已完成/失败/被终止 |
-| 🕒 团队任务待处理 / ✅ 团队任务已完成 | `session/event` 的 `team/task`（只对**状态变化**发；`in_progress`/`deleted` 不打扰） | 任务 owner 的母会话 | 工作区/会话名:任务标题 |
-| 🗜️ 上下文已智能压缩 | `session/event` 的 `compaction/end`（带 `error` 的失败压缩不报） | 该会话 | 工作区/会话名:上下文已智能压缩 |
-| ⏰ 定时任务已启动 | `session/event` 的 `schedule/change`（`operation='create'`；`delete`/dispatch 不打扰） | 该会话 | 工作区/会话名:定时任务标题 |
-| 🚀 启动播报 | 插件 `apply` 后等组合稳定（`loader.await()`）数一遍插件行 | 无（始终推送） | 插件启动成功:共有 N 个插件成功加载 / 有 N 个插件启动失败:加载失败的插件为 a、b |
+| ❓ 等待你回答 | `tools/execute` 捕获 `ask_user_question` 派发 | **发起提问的那个会话本身** | 工作区/会话名:[类型] 内容 |
+| 🚫 DSH 审批被自动拒绝 | `session/event` 流 `approval/asked`+`decided` 审计对 | **被拒操作所在会话本身** | 工作区/会话名:工具名-拒绝原因 |
+| 🤖 DSH 后台子代理结束 | `subagent/end` | **母会话 + 子代理会话**（看其中任一都静默） | 工作区/母会话名:子代理名已完成 |
+| 🎯 DSH 目标完成 / 阻塞 | `goal/changed` | 目标所属会话 | 工作区/会话名:目标-已完成 / 目标-阻塞原因 |
+| 🧰 DSH 后台任务结束 | `jobs.events` 的 `settled`（`awaited` 也通知；`kind='subagent'` 的 job 由上一行负责） | **所属会话 + 其所属子代理的母会话** | 工作区/母会话名:后台任务名已完成/失败/被终止 |
+| 🕒 DSH 团队任务待处理 / ✅ DSH 团队任务已完成 | `session/event` 的 `team/task`（只对状态变化发） | 任务 owner 的母会话 | 工作区/会话名:任务标题 |
+| 🗜️ DSH 上下文已智能压缩 | `session/event` 的 `compaction/end`（带 `error` 的不报） | **该会话本身**（看着它的父/子会话也照推） | 工作区/会话名:上下文已智能压缩 |
+| ⏰ DSH 定时任务已启动 | `schedule/changed` → 读 `catalog()` 比对**投递记录**（`lastDelivery` 变化才算"触发"） | **该定时任务所属会话本身** | 工作区/会话名:定时任务标题 |
+| 🚀 插件挂载成功 / ⚠️ 插件挂载异常 | 插件 `apply` 后等组合稳定数一遍插件行；**等一个有权限的在线页面**再发（最多 5 秒，超时降级） | 无（始终推送） | 共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级 / 有 N 个插件启动失败:加载失败的插件为 a、b |
 
-前缀的"工作区"按会话动态解析（多工作区并行时各显示自己的工作区名），"会话名"取 `sessionTitle` 服务。门控只比对会话，不影响文案。
-`awaited === true` 的结算（有调用方在等、结果已交给它）不通知；后台一次性子代理既是 `subagent/end` 又是 `kind='subagent'` 的 job，只由 `subagent/end` 报一次。
+前缀的"工作区"按会话动态解析（多工作区并行时各显示自己的工作区名），"会话名"取 `sessionTitle` 服务。**门控只比对会话，不影响文案；点击目标与静默判定是两件事**——例如子代理的提醒按"子代理会话"静默，但点击固定指向母会话（子会话 id 客户端目录里未必解析得到，指过去就是"点了不跳"）。
+
+静默规则的三种档位是有意区分的：**子代理**看"母会话 + 子会话"，**后台任务**看"所属会话 + 其母会话"，**其余**只看"该会话本身"（你正看着它的子代理或母会话时也会推送）。
 
 ## 给其它插件调用（对外 API）
 
@@ -106,18 +103,33 @@ export function apply(ctx) {
 }
 ```
 
-- 返回 `true` 表示**真的入队了**；被聚焦门控静默、命中同文案去重（1.5 秒窗口）、或当前平台没有通知后端时都返回 `false`（想区分原因用 `notify()`，它在载荷无效时返回 `{ ok: false, reason: 'invalid-payload' }`）。**标题为空一律 `false` 且不推送**（避免空通知）。`pushAlways` 是"强制弹"：既不看门控也不进去重窗口。
-- `title` 最长 160 字符、`message` 最长 400 字符，超出截断（不会切断 emoji 这类代理对）；队列仍按 200ms 间隔逐条发送，队列上限 32 条（超出丢最旧的）。
-- **`sessionId` 只管门控，`click` 只管点击**——两件事彻底分开（1.6.0 起）。`click` 是四态联合：
+- 返回 `true` 表示**真的入队了**；被聚焦门控静默、命中同文案去重（1.5 秒窗口）、或当前平台没有通知后端时都返回 `false`（想区分原因用 `notify()`）。**标题为空一律 `false` 且不推送**。`pushAlways` 是"强制弹"：既不看门控也不进去重窗口。
+- `title` 最长 160 字符、`message` 最长 400 字符，超出截断（不会切断 emoji 这类代理对）；队列按 200ms 间隔逐条发送，上限 32 条（超出丢最旧的）。
+- **`sessionId` 只管门控，`click` 只管点击**。`click` 是四态联合：
+
   | `click` | 点击后 |
   | --- | --- |
   | 不传 / `null` | **不跳转**（通知不可点击） |
   | `{ type: 'session', sessionId }` | 跳到该会话（子代理会话会进子代理界面） |
   | `{ type: 'page', page: 'settings-plugins' \| 'plugins' }` | 跳到该内置页面 |
   | `{ type: 'url', url: 'https://…' }` | 打开外部地址（只接受 http/https） |
-  形状不认识（缺字段、`page` 不在白名单、`url` 非 http(s)）一律当成**不可点击**——不猜测意图。旧字段 `url: 'https://…'` 仍然兼容，等价于 `{ type: 'url', url }`。
+
+  形状不认识（缺字段、`page` 不在白名单、`url` 非 http(s)）一律当成**不可点击**——不猜测意图。旧字段 `url: 'https://…'` 仍兼容，等价于 `{ type: 'url', url }`。
 - `sessionId` 可传会话对象、会话 id 或它们的数组（子代理场景可同时传主会话与子会话）。
 - 想全局取用可写 `inject: ['desktopNotify']`（硬依赖，本插件缺失时你的插件不会加载）；否则用 `ctx.get` 按可选服务处理。
+
+## 排查：为什么这条提醒没弹
+
+宿主暴露令牌保护的诊断端点 `GET /dnotify/status?t=<进程令牌>`（令牌见通知 URL 里的 `t=`，或 profile 日志）。与通知相关的字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `lastRoute` | 最近一条通知走了哪条路：`mode: "web"`（浏览器通知）或 `"native"`（原生 Toast），以及 `reason`：`no-online-page` / `permission-not-granted` / `deliver-failed` |
+| `lastSwReport` | Service Worker 与页面的最近一次回报：`register` / `permission` / `shown` / `click` / `focused` / `show-error` |
+| `lastNotify` / `notifyLog` | 最近若干次 `notify()` 的出口：`queued`（已入队）/ `silenced`（你正看着该会话）/ `duplicate`（去重窗口内）/ `dropped` |
+| `eventLog` | 最近若干条 `session/event` 的类型——用来判断某个钩子事件**到底有没有到达插件** |
+| `jobLog` | `jobs` 链路全过程：`hooked` + 每条事件的 `type/status/awaited/kind` |
+| `scheduleLog` | `schedule/changed` 与 `catalog()` 比对结果（`delivered` 表示判定为"刚触发"） |
 
 ## 项目结构
 
@@ -125,25 +137,23 @@ export function apply(ctx) {
 dsh-desktop-notify/
 ├── src/          # TypeScript 6 源码（strict + erasableSyntaxOnly，TS7 就绪）→ 编译到 lib/
 │                 # protocol.ts（ClickTarget 四态 + 线格式）、pages.ts（页面注册表状态机）
-│                 # activation.ts（三态激活决策）、gate.ts（按会话门控）、api.ts（对外推送 API）
+│                 # activation.ts（激活决策）、gate.ts（按会话门控）、api.ts（对外推送 API）
 │                 # text.ts（截断）、notify.ts（通知载荷模型）
 ├── lib/          # 构建产物 + 尚未迁移的手写模块
-│                 # 宿主端 index.js（路由/队列/事件）+ 发送层 winrt.js（Windows / koffi 直调 WinRT）
+│                 # 宿主端 index.js（路由/队列/事件/分流）+ 发送层 winrt.js（Windows / koffi 直调 WinRT）
 │                 #                                   toast-linux.js（Linux / D-Bus 直连）
 │                 # 主题：theme.js（状态+平台分发）、theme-win32.js（注册表+变更事件）、theme-linux.js（portal+信号）
 │                 #       theme-codec.js（判定纯逻辑）、icons.js（按主题选图标）
-│                 # 基础设施：dbus.js（常驻会话总线：Hello/调用/信号）、win32-registry.js（注册表+等待句柄）
-│                 #             state.js（有界容器+去重）、client.js（浏览器端聚焦/会话上报）
-├── assets/       # 通知图标：dsh-dark.{png,ico}（白鱼/深色主题）、dsh-light.{png,ico}（黑鱼/浅色主题）
-│                 #             dsh.{png,ico} 为旧路径兼容副本
-├── scripts/      # 安装脚本 install.ps1 / install.sh、语法自检 check-syntax.mjs
-│                 # 冒烟测试 winrt-probe.mjs（真发一条 Toast）、theme-probe.mjs（主题检查+切换事件）
-│                 # 契约自检 dsh-runtime-probe.mjs（把宿主半区挂进 DSH 自带的 cordis 真跑一遍）
+│                 # 基础设施：dbus.js（常驻会话总线）、win32-registry.js（注册表+等待句柄）
+│                 #             state.js（有界容器+去重）、client.js（浏览器端：聚焦/会话上报 + SW 注册）
+├── assets/       # dnotify-sw.js（通知用 Service Worker，由宿主在 /dnotify/sw.js 提供）
+│                 # 图标：dsh-dark.{png,ico}（白鱼/深色主题）、dsh-light.{png,ico}（黑鱼/浅色主题）、dsh.{png,ico} 旧路径兼容
+├── scripts/      # 语法自检 check-syntax.mjs（安装走 DSH 插件管理，本目录不放安装脚本）
+│                 # 冒烟测试 winrt-probe.mjs、theme-probe.mjs、契约自检 dsh-runtime-probe.mjs
 │                 # 图标生成 make-icon.py（开发期换图用，需 Python）
-├── tests/        # node --test 单测（协议/注册表/激活决策 / 宿主集成事件流 / 浏览器半区 / 聚焦门控
-│                 #                / 对外 API / D-Bus 编组与解码 / 主题判定 / 图标解析 / 有界容器 / 文本截断）
+├── tests/        # node --test 单测（协议/注册表/激活 / 宿主集成事件流 / 浏览器半区 / 门控 / API
+│                 #                / D-Bus 编组 / 主题判定 / 图标解析 / 有界容器 / 文本截断 / 句柄不变量）
 ├── docs/         # 架构、原理、上手文档 + TS6→TS7 迁移路线
-├── screenshots/
 ├── cordis.patch.yml
 └── package.json
 ```
@@ -154,32 +164,64 @@ dsh-desktop-notify/
 
 ## 工作机制与限制
 
-- **聚焦门控（按会话，事件驱动零轮询）**：浏览器半区（`lib/client.js`）通过官方 Connection RPC 通道 `/dnotify` 上报"页面是否聚焦"以及"该页面当前选中的会话"（取 harness 客户端 `sessions` 快照里"被主视图保留"的那个会话——`byId[*].retainedBy.mainView`，与官方 ui-layout/ui-session 同一判据，会话切换即时重报）——聚焦判定为 `visibilityState === 'visible' && document.hasFocus()`，由 `focus`/`blur`/`visibilitychange`/`pagehide` 原生事件即时触发（页面关闭经 `keepalive` 可靠上报失焦）；聚焦页面上的用户活动（键盘/鼠标/滚动，节流 10 秒）保持"保鲜"，另有 1 分钟聚焦心跳，避免"看着但不动鼠标"被保鲜超时误判为失焦。宿主端按"页面 × 会话"聚合（`lib/gate.js`）：**只有存在聚焦页面、且该页面选中的会话正是通知所属会话时才静默**；正在看会话 A 时，会话 B 完成照样弹。**拿不到会话归属的通知**（例如 owner 已清理的后台任务）一律推送，不静默。聚焦静止超 2 分钟视为失焦，异常关闭残留的页面条目 10 分钟自动清理。
-- **发送层（原生直连，无子进程）**：`lib/index.js` 按平台动态加载发送层（win32 之外不会 import koffi）。
-  - **Windows（`lib/winrt.js`）**：koffi 直调 WinRT（`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`），不拉起任何 Python/子进程；首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`）供通知中心显示图标。
-  - **Linux（`lib/toast-linux.js`）**：纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL 握手 → `Hello` 注册 → 调 `org.freedesktop.Notifications.Notify`），不调用 `notify-send`；连接常驻复用、断开自动重连（失败冷却 30s、错误去重），标题/正文/图标/urgency 都随方法参数发出。`Hello` 是总线强制步骤：没它就连 AddMatch/信号订阅都做不了（主题跟踪正需要）。
-  - 两平台共用同一条发送队列：200ms 间隔防轰炸，发送失败单次重排队，队列上限 32 条。
-- **主题与图标**：通知背景跟随系统深浅色，而图标不会被反色，所以随包带两套透明底图标（`dsh-dark.*` 白鱼 / `dsh-light.*` 黑鱼）。`lib/theme.js` 启动时读一次、之后跟踪切换事件：**Windows** 读 `HKCU\...\Themes\Personalize\SystemUsesLightTheme`（缺失退 `AppsUseLightTheme`），用 `RegNotifyChangeKeyValue` 异步事件 + 2 秒非阻塞句柄检查拿到切换通知；**Linux** 读 xdg-desktop-portal 的 `org.freedesktop.appearance/color-scheme`，订阅同接口的 `SettingChanged` 信号（portal 不可用时退环境变量启发式）。两条通道都可能不可用（策略/权限/无 portal），因此都挂一个 60 秒兜底重读；主题变化还会顺手改写 AUMID 图标，让通知中心的应用图标同步换色。
-- **点击跳转（1.6.0 起：先决策，再决定要不要开窗口）**。三态是互斥且可证明的：
-  | 情况 | 行为 |
-  | --- | --- |
-  | 配置里没有点击目标 | 不跳转（Toast 是普通通知，点了只消失） |
-  | 有目标 + 有可投递的 DSH 页面 | **只**把目标定向推给那一个页面（`/dnotify/events` + `/dnotify/claim`），**不产生任何窗口** |
-  | 有目标 + 没有 DSH 页面 | 打开 DSH 并带 `#dsh-notify=<目标>` 深链，由刚启动的页面完成跳转 |
+### 通知渠道（混合 backend，发送时决定）
 
-  选页规则：优先"此刻聚焦的页面"，其次"最后聚焦过且仍在线的页面"（你切去别的应用时就是它）。页面注册表按 `{pageId, seq, focused, sessionId, 连接数}` 记录，只接受更大的 `seq`（focus/blur 两个请求乱序到达也不会互相覆盖），连接数是计数而不是布尔（刷新时"新连接建立/旧连接关闭"任意先后都不会误判离线）。每一条点击都是一个带 `openId` 的独立消息，认领时校验归属（非目标页面拿到 id 也认领不了）——不存在"谁先抢到算谁"。
-  - **Windows 不再经过浏览器**：Toast 用自定义协议 `dsh-notify:<目标>`；插件启动时把 `HKCU\Software\Classes\dsh-notify` 的转发器指向本进程的 `/dnotify/activate?t=<令牌>`（端口/令牌每次启动重写一次，幂等）。转发器是一个**隐藏的 PowerShell 一跳**（`-WindowStyle Hidden`，约 0.3–0.6s，无窗口闪烁）：它只问宿主"这次该怎么处理"，只有宿主回答 `open` 时才 `Start-Process` 打开地址。所以"有页面时点通知"这条路径**一个窗口都不会开**。投递成功（`delivered`）时它还会**把浏览器窗口带到前台**——否则页面确实跳了，你看到的却是"点了没反应"（`config.focusWindow: false` 关掉这个前台激活；`config.clickProtocol: false` 整个关掉协议注册，点击退回浏览器落地页）。页面侧也会再 `window.focus()` 试一次（浏览器可能忽略，忽略无害）。
-  - **Linux 完全在宿主进程内**：命中 `ActionInvoked` 后直接问宿主决策，`open` 时才调 xdg-desktop-portal 的 `OpenURI`（不起子进程）。
-  - 目标语义：**会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换（与点侧栏会话行同一条链路）。**子代理与后台任务一律指向母会话**：宿主沿 `header.parentSession` 一路回溯到顶层会话（多层子代理不再停在中间层——那个 id 客户端目录里往往解析不到，表现就是"点了不跳"），子代理自己的名字写在正文里。**启动播报** → `page:settings-plugins`：客户端先点侧边栏的**真实设置入口**（`aria-label="设置"`，几十毫秒），不可用时才合成快捷键（0.2.0-rc.2 的 web 绑定是 **primary+alt+Comma**，desktop 是 primary+Comma），再退"确认有设置才点、否则 Esc 关掉"的菜单路径，最后退**插件面板**（`pluginNavigation.openBundle`）——全程 ~2s 内收敛，且不会在屏幕上留下多余菜单。`{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
-  - 兼容：旧字段 `url`（http/https）等价于 `{ type: 'url' }`；旧的 `#dsh-notify=<目标>` 深链与 `/dnotify/click?target=<目标>` 旧链接仍然可用（作为兜底）。
-  - **不再刷新页面**：`openSession()` 抛错（会话不在客户端目录里）时只记一条日志并放弃——旧版会写持久化选中项再 `location.reload()`，而 hash 那时已被清掉，表现就是"页面原地刷新但不跳转"。
-- **启动播报（每次启动一次）**：插件 `apply` 后等组合稳定，数一遍 `ctx.get('loader')` 里的插件行——`fiber.state` 为 ACTIVE 的算加载成功，FAILED / 没有 fiber / 等不来服务的一律算"没加载起来"并列出 `entry.options.id`；主动 `disabled` 的行不计入。数不出来（没有 loader 服务）就静默跳过。进程级标记放在 `globalThis`，热更新重复 apply 不会重播。
-- **消息缓存**：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知消费后即释放；按会话/按 id 的缓存全部**有界**（摘要 128 条、审批配对 64 条、提问时刻 32 条，超出淘汰最旧），常驻进程不会随会话数增长；**同来源同文案** 1.5 秒内只弹一次（事件重复派发或失败重投时不连弹；去重键 = 标题 + 正文 + 来源 id + 会话归属，所以两个同名后台任务、两个并行会话的同类提醒都各弹各的）；重启自动初始化。
+```
+产生通知
+ ├─ 有在线 DSH 页面，且该页面已授予通知权限 → Web Notification
+ │    页面 → Service Worker → showNotification()
+ │    点击 = notificationclick → clients.matchAll() → WindowClient.focus()
+ │      · 有 DSH 窗口 → 由浏览器自己把那个标签页交还给用户（精确，不靠标题猜）
+ │      · 没有窗口   → clients.openWindow(<DSH 深链>) 直接开 DSH（不经过中转页）
+ │    特点：零中转页、无 UIA/无障碍、无 PowerShell、点击即切
+ └─ 其余情况 → 原生 Toast（Windows WinRT / Linux D-Bus）
+      点击 → 打开 DSH 深链（新标签页）；降级说明只出现在**启动播报**正文里（`· 运行模式：…`）
+```
+
+- **Service Worker 是插件自带的**（`assets/dnotify-sw.js`，宿主在 `/dnotify/sw.js` 提供，带 `Service-Worker-Allowed: /`），**不是浏览器扩展**，不需要安装任何东西。
+- **通知属于 Service Worker**：注册过一次后，即使所有 DSH 标签页都关了，点击仍由 SW 接管（找不到窗口就开一个新的）——所以"关掉页面还能点通知跳转"是预期行为。注意：它依赖浏览器仍然运行。
+- **通知的产生**需要页面在线（本地无法唤醒 SW，除非引入 Web Push，本插件不做）——因此无页面时走原生 Toast，两条路的结果都是"能看到并跳转"。
+- **来源行（应用名 + 图标）由发通知的进程决定**：Web Notification 显示浏览器的身份（Firefox 等），无法改；只有原生 Toast 显示 AUMID 的品牌名（**DeepSeek Harness**）与插件图标。二者不能兼得。
+- **降级模式的判断**：页面上报的 `Notification.permission` 不是 `granted`，或通知没能推给页面。权限变化由页面侧 Permissions API 的 `onchange` **即时**上报（外加每次聚焦上报兜底），因此你在站点设置里改权限后会立刻生效并收到「⚠️ DSH 权限变更」。
+
+### 聚焦门控（按会话，事件驱动零轮询）
+
+浏览器半区（`lib/client.js`）通过官方 Connection RPC 通道 `/dnotify` 上报"页面是否聚焦"以及"该页面当前选中的会话"（取 harness 客户端 `sessions` 快照里被主视图保留的那个会话——`byId[*].retainedBy.mainView`，与官方 ui-layout/ui-session 同一判据，会话切换即时重报）。聚焦判定为 `visibilityState === 'visible' && document.hasFocus()`，由 `focus`/`blur`/`visibilitychange`/`pagehide` 原生事件即时触发（页面关闭经 `keepalive` 可靠上报失焦）；聚焦页面上的用户活动（键盘/鼠标/滚动，节流 10 秒）保持"保鲜"。
+
+宿主端按"页面 × 会话"聚合（`lib/gate.js`）：
+
+> **静默 ⇔ 存在一个正在聚焦的页面，且它当前选中的会话命中这条通知的会话列表。**
+
+- 切到别的窗口/标签、最小化 → **立刻恢复推送**；没有任何页面聚焦 → 一律推送；
+- **拿不到会话归属的通知**（例如启动播报）**永不静默**；
+- 聚焦静止超 2 分钟视为失焦，异常关闭残留的页面条目 10 分钟自动清理。
+
+### 发送层（原生直连，无子进程）
+
+- **Windows（`lib/winrt.js`）**：koffi 直调 WinRT（`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`），不拉起任何 Python/子进程；发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName = DeepSeek Harness` + `IconUri`，随主题改写）。
+- **Linux（`lib/toast-linux.js`）**：纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL → `Hello` → `org.freedesktop.Notifications.Notify`），不调用 `notify-send`；连接常驻复用、断开自动重连。`app_name` 同样是 **DeepSeek Harness**，图标随主题选。
+- 两平台共用同一条发送队列：200ms 间隔防轰炸，发送失败单次重排队，队列上限 32 条。
+
+### 主题与图标
+
+通知背景跟随系统深浅色，而图标不会被反色，所以随包带两套透明底图标（`dsh-dark.*` 白鱼 / `dsh-light.*` 黑鱼）。`lib/theme.js` 启动时读一次、之后跟踪切换事件：**Windows** 读 `HKCU\...\Themes\Personalize\SystemUsesLightTheme`（缺失退 `AppsUseLightTheme`），用 `RegNotifyChangeKeyValue` 异步事件 + 2 秒非阻塞句柄检查拿到切换通知；**Linux** 读 xdg-desktop-portal 的 `org.freedesktop.appearance/color-scheme`，订阅同接口的 `SettingChanged` 信号（portal 不可用时退环境变量启发式）。两条通道都挂 60 秒兜底重读。
+
+### 点击目标语义
+
+- **会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换。
+- **子代理与后台任务** → 点击一律指向**母会话**（宿主沿 `header.parentSession` 回溯到顶层；中间层 id 客户端目录里往往解析不到，表现就是"点了不跳"），子代理自己的名字写在正文里。**注意这与静默判定分开**：静默按事件所属会话判定。
+- **启动播报** → `page:settings-plugins`：客户端先点侧边栏的**真实设置入口**（可访问名「设置」，含桌面端的「账号菜单 → 设置」），再在设置对话框里点「内置插件」导航格并**验证它已就位**（`aria-current`）；打不开就继续重试（深链场景下页面刚加载，界面可能几秒后才挂载，最多等 10 秒）。**不会**退到侧栏「插件」页——落点错了就是错。
+- `{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
+- 兼容：旧字段 `url`（http/https）等价于 `{ type: 'url' }`；旧的 `#dsh-notify=<目标>` 深链与 `/dnotify/click?target=<目标>` 旧链接仍然可用。
+
+### 其它
+
+- **启动播报（每次启动一次）**：插件 `apply` 后等组合稳定，数一遍 `ctx.get('loader')` 里的插件行——`fiber.state` 为 ACTIVE 的算成功，FAILED / 没有 fiber / 等不来服务的一律算"没加载起来"并列出 `entry.options.id`；主动 `disabled` 的行不计入。**等一个有通知权限的在线页面**再发（最多 5 秒，超时降级为原生 Toast），以便走浏览器通知。进程级标记放在 `globalThis`，热更新重复 apply 不会重播。
+- **消息缓存**：仅缓存"最近一条助手回复摘要"（≤220 字符），任务完成通知消费后即释放；按会话/按 id 的缓存全部**有界**（摘要 128 条、审批配对 64 条、提问时刻 32 条，超出淘汰最旧）；**同来源同文案** 1.5 秒内只弹一次（去重键 = 标题 + 正文 + 来源 id + 会话归属，所以两个同名后台任务、两个并行会话的同类提醒都各弹各的）。
 - **`never` 政策下的审批通知**：`approval/request` waterfall 在 `never` 政策下不会派发，因此插件改从会话日志的 `approval/asked`/`approval/decided` 审计对获取被拒记录。想收到这类通知请保持审批政策为 `never`。
-- **通知图标**：Toast 的 appLogoOverride 只接受 PNG/JPG/GIF（不支持 SVG），插件随包携带四张图（`assets/dsh-dark.png|ico` 白鱼、`assets/dsh-light.png|ico` 黑鱼，由 `scripts/make-icon.py` 从 DSH favicon 一次栅格化；该脚本只是开发期换图工具，装插件时不需要跑，也不需要 Python），发送时按当前系统主题挑一套；旧路径 `assets/dsh.png|ico` 保留为深色（白鱼）版本的兼容副本。Toast 顶部/通知中心的程序应用图标来自 AUMID `DSH` 的注册表键 `IconUri`（只写 DSH 自己的键），同样随主题改写。
-- 依赖系统桌面通知后端：Windows Toast 由 WinRT 提供，Linux 由桌面会话的 D-Bus 通知服务（KDE/GNOME 等）提供；Windows **专注助手/勿扰模式**、Linux 的勿扰开关都可能吞掉通知。
-- **平台**：Windows 已实测（Windows 11）；Linux 走 D-Bus（Kubuntu/KDE、Ubuntu/GNOME 等桌面会话；无桌面会话的纯 SSH 环境不会弹通知），D-Bus 编组有单测覆盖；macOS 后端暂未实现（会加载但只记录一条"无后端"提示）。
-- **调试日志开关**：默认关闭，终端不输出 `[dsh-desktop-notify]` **状态**日志。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire/job settled/主题等状态日志。**错误**日志不受开关限制：发送失败、D-Bus 连接错误、钩子异常、无通知后端提示都照常打印。
+- **依赖系统桌面通知后端**：Windows Toast 由 WinRT 提供，Linux 由桌面会话的 D-Bus 通知服务提供；Windows **专注助手/勿扰模式**、Linux 的勿扰开关、以及浏览器层面的"静默通知"都可能吞掉通知（这类抑制无法被程序感知——`showNotification()` 依然会"成功"）。
+- **平台**：Windows 已实测（Windows 11 + Firefox）；Linux 走 D-Bus（Kubuntu/KDE、Ubuntu/GNOME 等桌面会话；无桌面会话的纯 SSH 环境不会弹通知），D-Bus 编组有单测覆盖；macOS 后端暂未实现（会加载但只记录一条"无后端"提示）。
+- **调试日志开关**：默认关闭，终端不输出 `[dsh-desktop-notify]` **状态**日志。排查时可在 profile 的 `cordis.patch.yml` 中覆盖 `desktop-notify` 行开启（`config: { debug: true }`），重启后终端会输出 notify 决策/聚焦上报/fire/job settled/schedule/SW 回报等状态日志。**错误**日志不受开关限制。除了日志，`/dnotify/status` 的诊断字段（见上）更适合事后核对。
 
 ## 许可证
 
@@ -190,5 +232,3 @@ dsh-desktop-notify/
 - 不提供任何担保（详见 GPL 第 15、16 条）。
 
 > 本程序是自由软件：你可以按自由软件基金会发布的 GNU 通用公共许可证（第 3 版，或你选择的任何更高版本）条款重新分发和/或修改它。本程序希望它有用，但**没有任何担保**，甚至没有适销性或特定用途适用性的默示担保。
->
-> 若你更希望把"改过的版本作为网络服务提供也必须开源"写得更明确，可换成 **AGPL-3.0-or-later**（只需替换 LICENSE 与清单里的标识符）。

@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.8.10] - 2026-10-01
+
+- **变更：安装方式改走 DSH 自带的插件安装器，删除 `scripts/install.ps1` / `scripts/install.sh`**。官方插件文档明确要求「不要用 shell 命令复刻 `install_bundle` 的安装与 bundle 选择步骤」，而本包清单本就是一份合规 bundle（`dsh.bundle.patch` + `dsh.client` + `koffi` 在 `dependencies`），安装器能装依赖、选 bundle、启用并提示需批准的安装脚本；AUMID 注册表键由插件自己在启动时按主题写好，与安装步骤无关。README 与 `docs/getting-started.md` 改为：插件管理 → 添加插件 → 填本机目录路径或仓库地址。
+- **变更：收紧依赖范围** `peerDependencies` 由 `>=0.1.7-rc.2 <0.3.0` 改为 **`>=0.1.7-rc.2 <=0.2.0-rc.2`** —— 只承诺实测过的这条线；0.2.x 的其它小版本可能有破坏性改动，不应预先声称兼容。README 的依赖需求表同步。
+
+- **新增：浏览器通知渠道（Web Notification），有在线页面时默认走它**。浏览器半区注册插件自带的 Service Worker（`assets/dnotify-sw.js`，宿主在 `/dnotify/sw.js` 提供，**不是浏览器扩展、无需安装**）；通知由 `showNotification()` 显示，**点击由浏览器自己处理**：`notificationclick` → `clients.matchAll()` → `WindowClient.focus()`。于是"标签页在后台 → 精确切到已有那个标签页"不再需要 UIA/无障碍、`SetForegroundWindow`、PowerShell 或标题匹配；**没有窗口时用 `clients.openWindow(<DSH 深链>)` 直接开 DSH**，不再经过中转页。该链路跨浏览器（Firefox / Chromium 系）且天然跨平台（Linux 同样适用）。
+- **新增：降级模式**。没有在线页面、或页面上报的通知权限不是 `granted` 时回退为原生 Toast，运行模式只出现在**启动播报**正文里（`共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`）；`/dnotify/click` 一律 302 到 DSH 深链（不再投递给已有页面）。**落地页与 UIA 前台激活那套实现整体删除**。
+- **新增：通知权限的首授权引导**。浏览器要求用户手势才弹授权框，因此不做自动弹窗，改为在 DSH 页面显示一张一次性的居中卡片（**DSH 界面风格**：遮罩 + 卡片 + 标题 + 说明 + 右下角按钮，按钮高 32px / 圆角 8px），带「设置」与「取消」两个按钮：前者弹浏览器授权框，后者只关掉卡片。外观与 DSH 自己的弹窗（`ui-primitives/Modal.module.css`）**同源**：背景 `--dsw-alias-bg-layer-2`（深色 `rgb(44,44,46)`，与 DSH 弹窗一致；早先误用 `bg-overlay` → 深色下是中灰 `rgb(97,102,107)`，显得太浅）、遮罩 `--dsw-alias-bg-mask-1`、圆角 `--dsw-radius-panel`、投影 `--dsw-elevation-prominent`，并且是**解析成实际颜色值**后再写进内联样式（直接写 `var()` 在卡片挂到 `body` 上时取不到作用域 token；只问 `:root` 会永远拿到浅色那份）；「设置」按钮的文字颜色按底色亮度自动选深色/白色（深色主题的品牌色本身是亮色，写死白字会字底融为一体）；任一标签页关掉卡片时其它标签页跟着关（`BroadcastChannel` / `localStorage` 兜底），显示前清掉残留旧卡片；权限恢复后再降级会**重新提示**（不再是一次性开关）。权限变化由 Permissions API 的 `onchange` **即时**感知（见下），手动在站点设置里授权后无需重启即可走浏览器通知。
+- **新增：`/dnotify/status` 诊断字段**（令牌保护）：`lastRoute`（走了哪条渠道及原因）、`lastSwReport`（SW 与页面回报）、`lastNotify`/`notifyLog`（每次入队/静默/去重的原因）、`eventLog`（最近的 `session/event` 类型）、`jobLog`（jobs 链路全程）、`scheduleLog`（定时任务比对结果）。"这条提醒为什么没弹"从此可查。
+- **变更：所有通知标题带 `DSH` 前缀**（图标与来源行改不了，标题就是品牌位），并新增「⚠️ DSH 权限变更」通知：正文 `dsh-desktop-notify 跟踪到消息提醒权限变更为:xxx，插件运行模式同步变更为xxx`，由 Permissions API 的 `onchange` 触发、不受门控静默、重复状态不打扰（首次得知只记基线，不算变更）。
+- **变更：来源行品牌化**。Windows 的 AUMID `DisplayName` 由 `DSH` 改为 **DeepSeek Harness**，Linux D-Bus 的 `app_name` 同步改为 **DeepSeek Harness**（原生 Toast 的来源行因此显示品牌名与插件图标；Web Notification 那一行由浏览器决定，无法修改）。
+- **变更：启动播报文案**：标题「🚀 DSH 插件挂载成功」/「⚠️ DSH 插件挂载异常」，正文 `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`（异常时 `存在 N 个插件运行异常：<ids>，…`）。
+- **变更：启动播报等一个有通知权限的在线页面再发**（最多 5 秒，超时降级为原生 Toast）。启动瞬间还没有页面连上来，不等就只能降级；而这条通知恰好是"点一下跳到设置→内置插件"的入口。
+- **变更：定时任务改为"触发时"提醒**。原先监听会话事件 `schedule/change` 的 `operation='create'`，而该事件**从不出现在 `session/event` 里**（实测 `eventLog` 中一次都没有），这条通知一直是死代码。现在监听 DSH 真正对外广播的 Cordis 事件 `schedule/changed`，再用 `catalog()` 的**投递记录**（`lastDelivery`）做快照比对：只有新投递才算触发，创建本身不打扰。
+- **变更：后台任务不再按 `awaited` 跳过**。母会话里跑的后台任务结算时 `awaited === true`，旧逻辑据此不通知；现在照常通知——"你正看着这个会话"这种打扰交给聚焦门控判断。`kind='subagent'` 的后台任务仍由「🤖 DSH 后台子代理结束」负责，避免同一件事两条。
+- **变更：静默范围分三档**（点击目标与静默判定彻底分开）：**后台子代理**看"母会话 + 子会话本身"；**后台任务**看"所属会话 + 其所属子代理的母会话"；**定时任务 / 上下文压缩 / 目标 / 提问 / 审批被拒**只看**该会话本身**——你正看着它的子代理或母会话时也会推送。
+- **修复：设置导航落点**。原先只认私有属性 `[data-shortcut-modal="settings"]`、按 `textContent` 找导航格，找不到设置对话框时会**退到侧栏「插件」页**（用户看到的错落点）。现在按真实结构（`role="dialog"` + 可访问名「设置」）打开、在对话框里按可访问名点「内置插件」并**验证就位**（`aria-current`），打不开就继续重试、**绝不**退到「插件」页。
+- **修复：深链导航重试到就位**。深链打开的是刚加载的页面，DSH 界面往往要几秒才挂载，旧实现约 2 秒就放弃 → 表现为"新标签页开了但停在原处"。现在最多重试 10 秒。
+- **修复：权限判定漏掉手动授权**。分流只看"投递页面"的权限，而权限可能是用户在站点设置里手动给的，于是误判为未知而走了降级。现在任一在线页面 `granted` 即走浏览器通知。
+- **修复：静态资源放行**。`/dnotify/sw.js` 不再过 DSH 的鉴权栅栏（注册 SW 的请求不带那些头）。
+- **还原云端线的既有修复**：断连幂等（`drop()` 只清理一次）、门控吃 `seq` 乱序、URL 校验、设置弹窗时序、Linux 兜底、等待中的调用保持 ref'd（CI 挂死的第二半）、句柄不变量单测、`withDeadline` 主题读取、CI 的依赖安装步骤与产物一致性门禁、koffi 3.3.2。
+- **文档**：README 重写（删除截图段、明确依赖范围 `DSH >= 0.1.7-rc.2` 且 `<= 0.2.0-rc.2`、通知一览与静默规则按当前实现、新增"为什么这条提醒没弹"的诊断表）；`docs/` 同步更新。；新增「权限变化即时感知并提示降级」
+- 测试：159 项全绿（新增：浏览器通知分流、降级提示、权限横幅与回报、定时任务触发判定、后台任务 `awaited` 通知、静默三档、设置导航不退到插件页、权限变化即时感知与"再次被阻止要再提醒"）。
+
 ## [1.7.0] - 2026-09-30
 
 - **全量迁移到 TypeScript 6**：原先手写的 9 个模块（宿主 `index`、浏览器半区 `client`、`dbus`、`winrt`、`toast-linux`、`theme*`、`win32-registry`）全部变成 `src/*.ts`，`lib/*.js` 一律是构建产物。三个 tsconfig：核心层 strict（协议/页面/激活/门控/API/状态/图标/文本）、平台层先关 strict 再逐模块收紧、浏览器半区按**脚本**编译（`moduleDetection: "legacy"`，不产生 `export {}`）。`npm run build` 依次跑三个配置；`npm test` 自动先构建。行为不变：149 项单测 + `dsh-runtime-probe`（真 cordis）+ `theme-probe`（真注册表）全通过，忽略空白后的产物差异只剩缩进/分号这类格式。
@@ -113,10 +137,10 @@
 - 通知类别：
   - ✅ 任务完成（`agent/status` running→idle，仅根 agent，3 秒去抖，会话标题 + 回复摘要）
   - ❓ 等待你回答（`tools/execute` 捕获 `ask_user_question` 派发）
-  - 🚫 审批被自动拒绝（`session/event` 流 `approval/asked`+`decided` 审计对）
+  - 🚫 DSH 审批被自动拒绝（`session/event` 流 `approval/asked`+`decided` 审计对）
   - 🤖 后台子任务结束（`subagent/end`）
-  - 🎯 目标完成 / 阻塞（`goal/changed`）
-  - 🧰 后台任务结束（jobs `onJobDone`）
+  - 🎯 DSH 目标完成 / 阻塞（`goal/changed`）
+  - 🧰 DSH 后台任务结束（jobs `onJobDone`）
 - 防打扰：浏览器半区经 Connection RPC 通道 `/dnotify` 上报页面可见性，仅页面不可见时弹（30 秒心跳 + `visibilitychange` 即时上报，页面关闭 90 秒后视为不可见）。
 - 通知由一次性 Python 进程 + `desktop-notifier`（Windows Toast）发送；700ms 队列间隔防轰炸；提问后 15 秒内抑制「任务完成」避免双重打扰。
 - 修复：`ctx.connection.rpc.handle` 补第三参 `{ authority: 'loopback' }`（dsh-client-connection rc 新增必填 `options.authority`，缺失会导致插件树加载失败）。

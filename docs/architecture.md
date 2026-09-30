@@ -4,12 +4,15 @@
 
 ```
 lib/index.js          宿主半区（ESM，export name/inject/apply(ctx, config)；按平台动态加载发送层；
-                      自带 /dnotify 前缀路由：聚焦上报 + SSE 推送 + claim 认领 + 点击落地页）
+                      自带 /dnotify 前缀路由：聚焦上报 + SSE 推送 + 通知分流 + SW 脚本 + 诊断；
+                      有在线页面且已授权走 Web Notification，否则原生 Toast 并标注降级）
 lib/gate.js           按"页面 × 会话"的聚焦门控（纯逻辑，tests/gate.test.mjs 覆盖）
 lib/api.js            对外推送 API（desktopNotify 服务的载荷归一与双模式路由，tests/api.test.mjs 覆盖）
-lib/winrt.js          Windows 发送层（koffi 直调 WinRT + AUMID 注册表写入）
+lib/winrt.js          Windows 发送层（koffi 直调 WinRT + AUMID 写入，DisplayName=DeepSeek Harness）
 lib/win32-registry.js Win32 注册表与等待句柄（winrt.js 与 theme-win32.js 共用同一批声明）
-lib/toast-linux.js    Linux 发送层（Notify 编组；连接/调用交给 lib/dbus.js）
+lib/toast-linux.js    Linux 发送层（Notify 编组，app_name=DeepSeek Harness；连接/调用交给 lib/dbus.js）
+assets/dnotify-sw.js  浏览器侧 Service Worker（宿主经 /dnotify/sw.js 提供）：
+                      showNotification() → notificationclick → clients.matchAll() → WindowClient.focus()
 lib/dbus.js           D-Bus 会话总线客户端（SASL → Hello → 方法调用/回复配对/信号订阅/重连，tests/dbus.test.mjs 覆盖）
 lib/theme.js          系统深浅色状态机 + 平台后端分发（60s 兜底重读）
 lib/theme-codec.js    主题判定纯逻辑（注册表 DWORD / portal color-scheme / 环境变量）
@@ -24,7 +27,7 @@ lib/client.js         浏览器半区（window.__ModuleLoader__.load 包裹，�
                       并兼容旧式 #dsh-notify 深链，tests/client.test.mjs 覆盖）
 assets/               通知图标：dsh-dark.{png,ico} 白鱼 / dsh-light.{png,ico} 黑鱼；dsh.{png,ico} 兼容副本
                       （均由 scripts/make-icon.py 从 dsh-logo.svg 栅格化）
-scripts/              install.ps1 / install.sh（安装）、check-syntax.mjs（语法自检）
+scripts/              check-syntax.mjs（语法自检）、probe 脚本（安装走 DSH 插件管理，不放安装脚本）
                       winrt-probe.mjs（真发一条 Toast）、theme-probe.mjs（主题检查+切换事件自检）
                       dsh-runtime-probe.mjs（把宿主半区挂进 DSH 自带的 cordis 跑契约自检）、make-icon.py（图标生成）
 tests/                node --test 单测（含 tests/host.test.mjs 的宿主事件流集成测试）

@@ -55,13 +55,14 @@
 | 🚫 审批被自动拒绝 | `session/event` | `approval/decided` 且 `outcome==='rejected'` | `工作区/会话名:工具名-拒绝原因` |
 | 🤖 后台子代理结束 | `subagent/end` | 子代理收敛 | `工作区/主会话名:子代理名已完成` |
 | 🎯 目标完成 / 阻塞 | `goal/changed` | `complete` / `block` | `工作区/会话名:目标-已完成 / 目标-阻塞原因` |
-| 🧰 后台任务结束 | `jobs.events` 的 `settled` | 任务结算且 `awaited === false`（`kind='subagent'` 由上一行负责） | `工作区/会话名:后台任务名已完成/失败/被终止` |
-| 🚀 启动播报 | `loader` 的插件行状态 | 每次启动一次（等组合稳定后） | `插件启动成功:共有 N 个插件成功加载` / `有 N 个插件启动失败:加载失败的插件为 a、b` |
+| 🧰 后台任务结束 | `jobs.events` 的 `settled` | 任务结算（**`awaited` 也通知**；`kind='subagent'` 由上一行负责） | `工作区/会话名:后台任务名已完成/失败/被终止` |
+| 🚀 插件挂载成功 / ⚠️ 插件挂载异常 | `loader` 的插件行状态 | 每次启动一次（等组合稳定 + 等一个有权限的在线页面，最多 5 秒） | `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级` / `存在 N 个插件运行异常：a、b，…` |
 
 - 前缀的**工作区按会话动态解析**（会话 `header.cwd` 的目录名；取不到用启动目录，多工作区并行时各显示自己的工作区）；会话名取 `sessionTitle` 服务。
 - 子代理/后台任务的主会话经 `session.header.parentSession` 回溯。
 - 每条通知同时把**会话归属**交给门控（见上节）：任务完成/提问/审批/目标用各自 `agent.session`/`session`；子代理用 `[主会话, 子会话]`；后台任务用 `job.owner`（0.1.7 起是 SessionId），取不到则不静默。
-- 后台任务的 `awaited === true`（有调用方在等这次结算、结果已交给它）不通知——对应 0.1.6 及更早版本的 `snapshot.reported`。
+- 后台任务的 `awaited === true`（有调用方在等这次结算）**也通知**：母会话里跑的后台任务结算时就是这种情况，旧逻辑据此跳过导致"后台任务结束"从不弹；"你正看着这个会话"这种打扰由聚焦门控判断，不在这里猜。
+- 静默范围分三档：子代理用 `[主会话, 子会话]`；后台任务用 `[所属会话, 其所属子代理的主会话]`；**定时任务/压缩/目标/提问/审批被拒只看该会话本身**（你正看着它的子代理或母会话时也会推送）。点击目标与静默判定是两件事：点击固定指母会话（子会话 id 客户端目录里未必解析得到）。
 - `kind === 'subagent'` 的 job 不在这里报：后台一次性子代理同时会走 `subagent/end`（`tool-subagent` 用 `jobs.start({ kind: 'subagent' })` 注册），两边都报就是两条 toast。
 - 根 agent 判定优先问 `agents.roots()`；服务缺失或此刻根列表为空时退回会话谱系（`header.origin === 'subagent'` / `delegationDepth`），避免"拿不到 roots 就把所有任务完成通知静默丢掉"。
 - 任务完成通知按"该会话有没有产出过内容"决定发不发（不按正文是否非空）：最后一轮只有工具调用时退化成"任务已完成"，而不是整条丢掉。
@@ -73,23 +74,31 @@
 - 只推一次：进程级标记放 `globalThis`（模块被 HMR 重新求值也不会重播）；没有 `loader` 服务（非 profile 组合）就跳过。
 - 正文按用户要的格式：成功 `插件启动成功:共有 N 个插件成功加载`，失败 `有 N 个插件启动失败:加载失败的插件为 a、b`。
 
-## 点击跳转
+## 通知渠道与点击跳转（混合 backend）
 
-1. 宿主按当前通知的会话归属生成目标（`session:<id>`），启动播报用 `page:settings-plugins`；地址取自 `webServer` 服务的 `host:port`（退路 `DSH_WEB_URL`），拼成
-   `http://127.0.0.1:<port>/dnotify/click?t=<进程令牌>&target=<目标>`。令牌每次进程随机生成，防止任意网页靠 `<img>` 之类盲触发跳转。
-   > 1.6.1 曾注册 `dsh-notify:` 自定义协议 + 隐藏 PowerShell 一跳来避免"点击新开标签页"；
-   > 用户判定该做法低效（每次点击起一个进程），1.6.2 已按要求移除：统一走这个 http 落地页，
-   > **接受浏览器新开一个标签页**——那是系统打开 URL 的固有行为，浏览器也拒绝脚本关闭它。
-2. 发送层落地：
-   - **Windows**：Toast XML 加 `activationType="protocol"` + `launch=URL`，点击由系统交给浏览器打开（不需要注册 COM 激活器）；没有 URL 的 Toast 保持普通形态。
-   - **Linux**：`actions` 加 `default` 动作，等 `Notify` 回复拿到通知 id 并记下 id→URL；收到 `ActionInvoked` 后用 xdg-desktop-portal `OpenURI` 打开（无子进程）。
-3. 点击落地页（`/dnotify/click`）不是 DSH 页面，只做两件事：校验令牌并把目标存成"待认领"，返回一行提示并尝试 `window.close()`（浏览器通常拒绝脚本关闭系统打开的标签，于是它停在那行提示上）。
-4. 已打开的 DSH 页面通过 SSE（`/dnotify/events`）立刻收到目标 → `POST /dnotify/claim` 认领 → **先到先得，宿主只放行一个页面**（认领即清空），所以多页面并存时只切一个，切的是"你已经在用的那个页面"（新开的落地标签页不参与跳转）。
-5. 客户端执行目标：
-   - `session:<id>` → `ctx.get('uiWorkspace').openSession(id)`（与点侧栏会话行同一条链路）；服务未就绪就重试；会话不在客户端目录里（同步抛错）则退回"写 `dsh.sessions.current` + 整页刷新"。子代理会话由 ui-workspace 自己的规则解析成**子代理界面**；后台任务通知的目标就是它的**主会话**。
-   - `page:settings-plugins` → 合成 ⌘/Ctrl+, 打开「设置」，再点弹窗里的「内置插件」导航格；两条路（快捷键、账号菜单）都不行就退回**插件面板**。
+发送时按"有没有可用的在线页面"分流，两条路的点击都由**拥有该能力的一方**处理：
+
+```
+产生通知
+ ├─ 有在线 DSH 页面，且其通知权限为 granted → Web Notification
+ │    页面收到 SSE 的 notify 事件 → 交给 Service Worker → showNotification()
+ │    点击 = notificationclick → clients.matchAll({type:'window',includeUncontrolled:true})
+ │      · 命中 DSH 窗口 → WindowClient.focus()：由**浏览器自己**把那个标签页交还给用户
+ │      · 没有窗口      → clients.openWindow(<DSH 深链>)：直接开 DSH，不经中转页
+ └─ 其余情况 → 原生 Toast（Windows WinRT / Linux D-Bus）
+      点击 → GET /dnotify/click → **302 到 DSH 深链**（新标签页），正文标注「降级模式」
+```
+
+1. Service Worker 是**插件自带的**（`assets/dnotify-sw.js`，宿主经 `/dnotify/sw.js` 提供，带 `Service-Worker-Allowed: /`），不是浏览器扩展、无需安装。页面注册后上报自己的 `pageId`，SW 维护 `pageId → clientId` 映射。
+2. **点击不需要页面在**：通知属于 SW（注册一次后浏览器一直记得），所以即使所有 DSH 标签页都关了，点击仍由 SW 接管；找不到窗口就开新的。注意它依赖浏览器仍在运行。
+3. **通知的产生需要页面在线**：本地无法唤醒 SW（除非引入 Web Push，本项目不做）。所以无页面时走原生 Toast —— 两条路的结果都是"看得见、点得跳"。
+4. **来源行由发通知的进程决定**：Web Notification 显示浏览器身份（Firefox 等），无法修改；只有原生 Toast 显示 AUMID 品牌名（**DeepSeek Harness**）与插件图标。二者不可兼得，按用户要求默认走 Web Notification。
+5. **权限引导**：浏览器要求用户手势才弹授权框，因此页面显示一次性居中提示「点击以允许发送通知」；权限状态随每次聚焦上报同步给宿主，因此手动在站点设置里授权也会被立刻识别。
+6. **降级判定**：`lastRoute.reason` 会写清原因（`no-online-page` / `permission-not-granted` / `deliver-failed`）。`/dnotify/click` 一律 302 到 DSH 深链（`#dsh-notify=<目标>`），客户端解析后 `history.replaceState` 清掉，避免刷新重复触发。
+7. 客户端执行目标：
+   - `session:<id>` → `ctx.get('uiWorkspace').openSession(id)`（与点侧栏会话行同一条链路）；服务未就绪就重试；会话不在客户端目录里（同步抛错）则只记日志放弃（旧版会原地刷新，见下）。子代理会话由 ui-workspace 自己的规则解析成**子代理界面**；子代理/后台任务通知的目标是它的**主会话**。
+   - `page:settings-plugins` → 先点侧边栏**真实设置入口**（可访问名「设置」；桌面端走「账号菜单 → 设置」），再在设置对话框（`role="dialog"` + 可访问名「设置」）里按**可访问名**点「内置插件」导航格并验证 `aria-current`；打不开就重试（深链场景下界面可能几秒后才挂载，最多 10 秒）。**不会**退到侧栏「插件」页——落点错了就是错。
    - `page:plugins` → `ctx.get('pluginNavigation').openBundle('dsh-desktop-notify')`（退路 `layout.selectPanel('plugins')`）。
-6. 旧的 `#dsh-notify=<目标>` hash 形式仍兼容：解析后立刻 `history.replaceState` 清掉，避免刷新重复触发。
 
 > ⚠️ SSE 心跳别碰 cordis 定时器的返回值：`ctx.timeout/ctx.effect` 返回的是
 > `Disposable<Promise<void>>`（`fiber.ts:64-74`：**可调用 + thenable，没有 `.catch`**）。
@@ -104,12 +113,16 @@
 
 | 端点 | 方法 | 用途 |
 | --- | --- | --- |
-| `/dnotify/page-focus` | POST | 页面聚焦状态 + 当前选中会话（会话级门控的输入） |
-| `/dnotify/events` | GET | SSE：把待处理的跳转推给已打开的页面（25s 心跳注释保活） |
-| `/dnotify/claim` | POST | 认领跳转，先到先得（返回 `{ ok, target }`） |
-| `/dnotify/click` | GET | 通知点击落地页（进程令牌校验；记录目标 + 自关） |
+| `/dnotify/page-focus` | POST | 页面聚焦状态 + 当前选中会话 + 通知权限（会话级门控与渠道分流的输入） |
+| `/dnotify/events` | GET | SSE：把 `notify`（通知内容）/`navigate`（跳转）推给已打开的页面（25s 心跳保活） |
+| `/dnotify/claim` | POST | 认领跳转（主要服务于 `/activate` 的协议路径），先到先得 |
+| `/dnotify/click` | GET | 降级模式的通知点击入口：**一律 302 到 DSH 深链**（进程令牌校验） |
+| `/dnotify/sw.js` | GET | 提供通知用 Service Worker（`Service-Worker-Allowed: /`，不过鉴权栅栏） |
+| `/dnotify/sw/report` | POST | SW 与页面上报：`register` / `permission` / `shown` / `click` / `focused` / `show-error` |
+| `/dnotify/status` | GET | 令牌保护的诊断：`lastRoute` / `lastSwReport` / `lastNotify` / `notifyLog` / `eventLog` / `jobLog` / `scheduleLog` 等 |
+| `/dnotify/poc-notify` | GET | 开发期触发器：让在线页面弹一条通知，用于验证 SW 链路 |
 
-除 `/click` 外都先过 `ctx.connection.admit(req)`（DSH 自己的 Host/Origin 栅栏 + 浏览器鉴权）：没有页面 cookie 的请求得到 401，不会误触发状态。`/click` 用进程令牌校验——它是系统/浏览器直接打开的顶层导航（没有 Origin，也不该要求 cookie）。
+除静态资源（`/sw.js`）与 `/click` 外都先过 `ctx.connection.admit(req)`（DSH 自己的 Host/Origin 栅栏 + 浏览器鉴权）：没有页面 cookie 的请求得到 401，不会误触发状态。`/click` 用进程令牌校验——它是系统/浏览器直接打开的顶层导航（没有 Origin，也不该要求 cookie）。
 
 ## 为什么审批被拒走 `session/event` 而不是 `approval/request`
 
