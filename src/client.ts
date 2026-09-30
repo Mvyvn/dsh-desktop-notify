@@ -265,6 +265,7 @@
       var lastCellClick = 0
       var done = false
       var timer = setInterval(function () {
+        if (!clientAlive()) { clearInterval(timer); return }
         if (done) { clearInterval(timer); return }
         var modal = settingsModal()
         if (modal) {
@@ -415,6 +416,7 @@
       if (first !== 'not-ready') { reportNavigate(openId, first); return }
       var attempts = 0
       var timer = setInterval(function () {
+        if (!clientAlive()) { clearInterval(timer); return }
         attempts += 1
         var result = applyTarget(target)
         if (result !== 'not-ready' || attempts >= NAV_RETRIES) {
@@ -490,6 +492,27 @@
      * 不做自动弹窗（Firefox 会拒绝无手势的 requestPermission）。
      */
     var permissionBannerShown = false
+
+    /**
+     * 客户端定时器登记表：插件卸载或 HMR 重载时必须**全部**清掉 ——
+     * 否则旧实例的跳转重试（最长 ~10s）、workspace 等待（最长 ~15s）与聚焦心跳会继续跑，
+     * 并且和"新实例"抢着上报/跳转。
+     */
+    var clientTimers: any[] = []
+    /** 插件卸载/HMR 后置 true：所有客户端定时器回调据此**立即自杀**（不依赖能否拿到 id）。 */
+    var clientDisposed = false
+    function clientAlive(): boolean { return !clientDisposed }
+    /** 事件驱动之外的轮询兜底周期（只在"事件丢失"时起作用，不是主路径）。 */
+    var SW_ANNOUNCE_FALLBACK_MS = 30000
+    function trackTimer(id: any): any { clientTimers.push(id); return id }
+    function clearClientTimers(): void {
+      for (var i = 0; i < clientTimers.length; i += 1) {
+        try { clearInterval(clientTimers[i]) } catch (e) { /* ignore */ }
+        try { clearTimeout(clientTimers[i]) } catch (e) { /* ignore */ }
+      }
+      clientTimers.length = 0
+      clientDisposed = true
+    }
 
     function prefersDark(): boolean {
       try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) } catch (e) { return false }
@@ -689,30 +712,48 @@
         }).catch(function () { /* 不支持 permissions.query（老浏览器）→ 退回聚焦上报 */ })
       } catch (e) { /* ignore */ }
     }
-    function registerServiceWorker(): void {
-      if (!('serviceWorker' in navigator)) return
+    // SW 事件（具名函数：卸载时要摘掉，否则 HMR 后新旧实例各报一次）
+    var onSwControllerChange = function (): void { announceToServiceWorker(swRegistration) }
+    var onSwReAnnounce = function (event: any): void {
+      var msg = event && event.data
+      // SW 冷启动/被回收后它的 pageId→clientId 映射会丢，由 SW 主动要求重报 ——
+      // 事件驱动，取代原来的「每 30 秒轮询重报」。
+      if (msg && msg.type === 're-announce') announceToServiceWorker(swRegistration)
+    }
+    var swRegisterPromise: Promise<any> | null = null
+    /** 接线只做一次：注册、监听、权限观察、首次回报。 */
+    function wireServiceWorker(reg: any): void {
+      swRegistration = reg
+      announceToServiceWorker(reg)
+      navigator.serviceWorker.addEventListener('controllerchange', onSwControllerChange)
+      navigator.serviceWorker.addEventListener('message', onSwReAnnounce)
+      try { navigator.serviceWorker.ready.then(function () { announceToServiceWorker(reg) }) } catch (e) { /* ignore */ }
+      reportSw({ kind: 'register', pageId: getPageId(), permission: notifyPermission() })
+      if (notifyPermission() !== 'granted') showPermissionBanner()
+      watchNotifyPermission()
+      // 纯事件驱动：focus/visibility/pagehide/controllerchange + SW 主动要求重报
+      // （SW 被回收后它自己会要一轮；映射另有 IndexedDB 持久化，不需要页面轮询）。
+    }
+    /**
+     * 幂等注册：`openEventStream()` 与「投递失败重试」两处都会调它。旧实现每次都重新
+     * register 并再挂一遍 controllerchange 监听、再加一个 30 秒定时器，于是同一次启动会
+     * 出现多个监听器/定时器（生命周期泄漏 + 重复上报）。现在复用同一个 promise：
+     * 失败时清空以便下次重试，但**不会**重复接线。
+     */
+    function registerServiceWorker(): Promise<any> | null {
+      if (!('serviceWorker' in navigator)) return null
+      if (swRegisterPromise) return swRegisterPromise
       try {
-        navigator.serviceWorker.register(ROUTE_PREFIX + '/sw.js', { scope: '/' })
+        swRegisterPromise = navigator.serviceWorker.register(ROUTE_PREFIX + '/sw.js', { scope: '/' })
           .catch(function () { return navigator.serviceWorker.register(ROUTE_PREFIX + '/sw.js') })
-          .then(function (reg) {
-            swRegistration = reg
-            announceToServiceWorker(reg)
-            navigator.serviceWorker.addEventListener('controllerchange', function () { announceToServiceWorker(reg) })
-            try { navigator.serviceWorker.ready.then(function () { announceToServiceWorker(reg) }) } catch (e) { /* ignore */ }
-            // SW 冷启动/被回收后映射会丢：周期性重报
-            setInterval(function () {
-              announceToServiceWorker(reg)
-              // 顺带把权限变化告诉宿主（用户手动改过站点权限时也能收敛）
-              reportSw({ kind: 'permission', state: notifyPermission(), pageId: getPageId() })
-            }, 30000)
-            reportSw({ kind: 'register', pageId: getPageId(), permission: notifyPermission() })
-            if (notifyPermission() !== 'granted') showPermissionBanner()
-            watchNotifyPermission()
-          })
+          .then(function (reg) { wireServiceWorker(reg); return reg })
           .catch(function (e) {
             reportSw({ kind: 'register-error', message: String((e && e.message) || e) })
+            swRegisterPromise = null   // 允许重试；接线仍然只有成功那次
+            return null
           })
-      } catch (e) { /* ignore */ }
+      } catch (e) { swRegisterPromise = null }
+      return swRegisterPromise
     }
     // SW → 页面：点击通知后要求把目标会话切过来
     try {
@@ -739,8 +780,13 @@
         target: String(envelope.target || ''),
         deepLink: String(envelope.deepLink || ''),
       })
-      reportSw({ kind: 'show-request', sent: sent, permission: state, target: String(envelope.target || '') })
-      if (!sent) registerServiceWorker()
+      reportSw({ kind: 'show-request', sent: sent, permission: state, tag: String(envelope.tag || ''), target: String(envelope.target || '') })
+      if (!sent) {
+        // 通知没能交给 SW（SW 还没 ready / 页面刚加载）：立刻上报失败，
+        // 让宿主用原生 Toast 兜底，而不是干等满 ACK 期限。
+        reportSw({ kind: 'show-error', tag: String(envelope.tag || ''), message: 'sw-not-ready' })
+        registerServiceWorker()
+      }
     }
     /** 认领**这一次**点击：带 openId，连点两条通知也不会认领错。 */
     function claimOpen(openId: string): void {
@@ -829,6 +875,7 @@
     function waitForWorkspaceThen(raw: string): void {
       var attempts = 0
       var timer = setInterval(function () {
+        if (!clientAlive()) { clearInterval(timer); return }
         attempts += 1
         var workspace = clientService('uiWorkspace')
         if (workspace && typeof workspace.openSession === 'function') {
@@ -894,11 +941,18 @@
         // 聚焦心跳：只在聚焦时打点，失焦/隐藏立刻停（后台标签页的定时器会被浏览器
         // 节流到分钟级，本来也不可靠，所以不可见时直接不依赖它）
         var heartbeat = setInterval(function () {
+          if (!clientAlive()) { clearInterval(heartbeat); return }
           if (isFocused()) report()
         }, HEARTBEAT_MS)
 
         return function () {
           clearInterval(heartbeat)
+          // 客户端自己的定时器全部清掉（跳转重试、workspace 等待、冲突探测…），
+          // 否则 HMR/卸载后旧实例还会继续跑并与新实例抢着上报/跳转。
+          clearClientTimers()
+          // SW 事件监听也要摘（否则 HMR 后新旧实例各报一次 register/permission）
+          try { navigator.serviceWorker.removeEventListener('controllerchange', onSwControllerChange) } catch (e) { /* ignore */ }
+          try { navigator.serviceWorker.removeEventListener('message', onSwReAnnounce) } catch (e) { /* ignore */ }
           closeEventStream()
           window.removeEventListener('focus', onFocus)
           window.removeEventListener('blur', onBlur)

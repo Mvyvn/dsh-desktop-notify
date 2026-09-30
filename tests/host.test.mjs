@@ -695,6 +695,11 @@ test('混合 backend 分流：页面在线且权限 granted → 浏览器通知�
   assert.equal(h.sent.length, 1, '有权限时不再发原生 Toast')
   assert.match(stream.res.chunks.join(''), /event: notify/, '内容通过 notify 事件交给页面（页面再交给 SW 显示）')
   assert.match(stream.res.chunks.join(''), /session:s1/, '点击目标要随通知一起带过去')
+  // SW 回报 shown：这条浏览器通知成功，不需要原生兜底
+  {
+    const tag = (String(stream.res.chunks.join('')).match(/"id":"(n-[^"]+)"/) || [])[1]
+    if (tag) await h.request({ method: 'POST', url: '/dnotify/sw/report', body: { kind: 'shown', tag } })
+  }
   assert.match(
     stream.res.chunks.join(''),
     /#dsh-notify=/,
@@ -709,6 +714,27 @@ test('混合 backend 分流：页面在线且权限 granted → 浏览器通知�
   h.advance(600)
   assert.equal(h.sent.length, 1, '任一在线页面 granted 就不该再降级')
   assert.match(stream2.res.chunks.join(''), /event: notify/, '通知应交给有权限的那个页面')
+  {
+    const tag = (String(stream2.res.chunks.join('')).match(/"id":"(n-[^"]+)"/) || [])[1]
+    if (tag) await h.request({ method: 'POST', url: '/dnotify/sw/report', body: { kind: 'shown', tag } })
+  }
+})
+
+test('显示回执：走浏览器通知但迟迟没有 shown 回报时，用原生 Toast 兜底', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
+  h.advance(300)
+  const before = h.sent.length
+  h.services.desktopNotify.pushAlways({ title: '需要回执', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  assert.match(stream.res.chunks.join(''), /event: notify/, '先走浏览器通知（SSE 推给页面）')
+  assert.equal(h.sent.length, before, '期限内不该提前兜底')
+  h.advance(900)   // 越过 SHOWN_ACK_MS
+  assert.equal(h.sent.length, before + 1, '没有 shown 回报就用原生 Toast 兜底（宁可重复，不可静默丢）')
+  const st = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
+  assert.equal(st.lastRoute.mode, 'native')
+  assert.equal(st.lastRoute.reason, 'no-shown-ack', '降级原因要能看出是回执缺失')
 })
 
 test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', async () => {
@@ -1061,7 +1087,12 @@ test('没有 loader 服务（非 profile 组合）时不播报、不报错', asy
 
 test('权限迁移：掉到不可用立刻提醒降级；修好后再次被阻止要再提醒（不是每进程一次）', async () => {
   const h = await start({ roots: [ROOT_AGENT], config: { claimWaitMs: 60 } })
-  await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  // 真实流程里 SW 一定会回报 shown；收到后宿主就认定浏览器通知成功，不再原生兜底
+  const ackShown = () => {
+    const tag = (String(stream.res.chunks.join('')).match(/"id":"(n-[^"]+)"/) || [])[1]
+    return tag ? h.request({ method: 'POST', url: '/dnotify/sw/report', body: { kind: 'shown', tag } }) : Promise.resolve()
+  }
   const focus = (permission) => h.request({
     method: 'POST', url: '/dnotify/page-focus',
     body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission },
@@ -1091,6 +1122,7 @@ test('权限迁移：掉到不可用立刻提醒降级；修好后再次被阻�
   // ③ 用户又改回"允许"，再不小心阻止一次 → 必须**再次**提醒（这是"每进程一次"会漏掉的情况）
   await focus('granted')
   h.advance(600)
+  await ackShown()   // 这条走浏览器通知：回报 shown，避免触发原生兜底
   await report('denied')
   h.advance(600)
   assert.equal(degradedCount(), 2, '回到 granted 后再次被阻止要重新提醒')
