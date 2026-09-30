@@ -695,6 +695,11 @@ test('混合 backend 分流：页面在线且权限 granted → 浏览器通知�
   assert.equal(h.sent.length, 1, '有权限时不再发原生 Toast')
   assert.match(stream.res.chunks.join(''), /event: notify/, '内容通过 notify 事件交给页面（页面再交给 SW 显示）')
   assert.match(stream.res.chunks.join(''), /session:s1/, '点击目标要随通知一起带过去')
+  assert.match(
+    stream.res.chunks.join(''),
+    /#dsh-notify=/,
+    'SW 找不到窗口时的兜底地址必须是 DSH 深链本身，而不是 /dnotify/click 中转页',
+  )
 
   // ③ 权限可能是**另一个标签页**手动允许的（不经过我们的申请流程）：只要任一在线页面是
   //    granted，就该走浏览器通知 —— 之前只看"投递页面"的权限，于是误判成 unknown 走了降级。

@@ -404,7 +404,9 @@ export function apply(ctx, config) {
           body: String(item.message || ''),
           tag: id,
           target: click.wire,
-          deepLink: click.scheme || click.fallback || '',
+          // SW 在"找不到任何 DSH 窗口"时会用这个地址 openWindow。这里给**DSH 深链本身**，
+          // 而不是 /dnotify/click 中转地址 —— 那样点击会先开中转页再 302（多一跳、还闪一下）。
+          deepLink: (() => { try { return appUrlFor(item.click || emptyClick()) } catch (e) { return '' } })(),
         })
         if (sent > 0) {
           lastRoute = { at: Date.now(), mode: 'web', pageId: pick.pageId, permission: pick.permission, reason: '' }
