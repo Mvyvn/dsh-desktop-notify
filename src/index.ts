@@ -483,13 +483,22 @@ export function apply(ctx, config) {
   function notify(title, message, urgency, sessionOrIds, options: any = {}) {
     const sessionIds = sessionIdList(sessionOrIds)
     const silenced = gate.silenced(sessionIds, Date.now())
+    // "为什么这条提醒没弹"必须能查：把最近一次 notify 的判定结果留在 /status 里
+    // （silenced=true 表示你正看着那个会话、被门控按设计静默；duplicate 表示去重窗口内重复）。
+    lastNotify = {
+      at: Date.now(),
+      title: String(title || ''),
+      sessionIds: sessionIds.slice(0, 4),
+      silenced: !!silenced,
+      reason: silenced ? 'silenced' : 'pending',
+    }
     // 传了会话却归一不出 id（形状不认识）时留一条日志：否则门控会静默退化成
     // "永不静默"，而调用方看不出任何异常。
     if (sessionIds.length === 0 && sessionOrIds !== undefined && sessionOrIds !== null) {
       log('[dsh-desktop-notify] 会话归属无法归一（既不是 id 也不是带 id 的对象），按"归属不明"处理：不静默')
     }
     log(`[dsh-desktop-notify] notify(${title}) pages=${gate.size} session=${sessionIds.join(',') || '-'} silenced=${silenced}`)
-    if (silenced) return { queued: false, silenced: true, reason: 'silenced' }
+    if (silenced) { pushRing(notifyLog, Object.assign({}, lastNotify, { reason: 'silenced' })); return { queued: false, silenced: true, reason: 'silenced' } }
     // 同来源同文案去重：宿主事件可能重复派发，或本条刚从失败重试回来。
     // 键 = 标题 + 正文 + 来源标识 + 会话归属：会话也要进键，否则"两个会话在同一秒
     // 弹出同前缀同结尾的提醒"（并行根会话/agent-team）会被误判成重复而丢掉一条。
@@ -497,10 +506,13 @@ export function apply(ctx, config) {
     const key = title + '\u0000' + (message || '') + '\u0000' + (dedupeKey || '') + '\u0000' + sessionIds.join(',')
     if (!shouldSend(key, Date.now())) {
       log('[dsh-desktop-notify] 同文案在去重窗口内，跳过')
+      lastNotify = { at: Date.now(), title: String(title || ''), sessionIds: sessionIds.slice(0, 4), silenced: false, reason: 'duplicate' }
+      pushRing(notifyLog, lastNotify)
       return { queued: false, silenced: false, reason: 'duplicate' }
     }
     const click = options.click && typeof options.click === 'object' ? options.click : clickNone()
     const queued = enqueue({ title, message, urgency, click })
+    pushRing(notifyLog, { at: Date.now(), title: String(title || ''), sessionIds: sessionIds.slice(0, 4), silenced: false, reason: queued ? 'queued' : 'dropped' })
     return { queued, silenced: false, reason: queued ? '' : 'dropped' }
   }
 
@@ -831,6 +843,19 @@ export function apply(ctx, config) {
     }
   }
   let lastSwReport: any = null
+  /** 最近一次 notify 的判定（门控/去重/入队）：用来回答"为什么这条提醒没弹"。 */
+  let lastNotify: any = null
+  /** 环形日志（各留最近 10 条）：某个提醒没弹时，能看出"是没触发、被静默，还是被去重"。 */
+  const notifyLog: any[] = []
+  const eventLog: any[] = []
+  /** jobs 服务的事件（后台任务结算）—— 不是会话事件，单独记，否则"没弹"无法归因。 */
+  const jobLog: any[] = []
+  /** schedule 的 Cordis 事件（无载荷）—— 用来判定"定时任务到底有没有对外广播"。 */
+  const scheduleLog: any[] = []
+  function pushRing(ring: any[], entry: any): void {
+    ring.push(entry)
+    if (ring.length > 10) ring.shift()
+  }
   /** 最近一次通知走了哪条路（web / native）以及原因 —— 一眼看清为什么降级。 */
   let lastRoute: any = null
   /**
@@ -952,6 +977,11 @@ export function apply(ctx, config) {
         lastClaim,
         lastNavigate,
         lastSwReport,
+        lastNotify,
+        notifyLog,
+        eventLog,
+        jobLog,
+        scheduleLog,
         lastRoute,
         streams: [...openStreams.values()].map((m) => m.pageId || ''),
         gate: gate.size,
@@ -1222,6 +1252,8 @@ export function apply(ctx, config) {
     try {
       const type = event && event.type
       const data: any = (event && event.data) || {}
+      // 记录事件类型（环形）：某个提醒没弹时，先看它的事件到底有没有到达
+      pushRing(eventLog, { at: Date.now(), type: String(type || ''), session: String((session && session.id) || session || '') })
 
       // ---- 团队任务（DSH agent-team，0.2.0-rc.2 起的事件面）----
       //   team/task: { version: 2, teamId, task: TeamTaskSnapshot }
@@ -1419,6 +1451,16 @@ export function apply(ctx, config) {
     } catch (e) { /* ignore */ }
   })
 
+  // ---- 定时任务：DSH 侧的对外广播 ----
+  // schedule 服务只发一个**无载荷**的 Cordis 事件 `schedule/changed`（见 DSH 的
+  // packages/schedule/schedule/src/index.ts: emit('schedule/changed')）；会话事件
+  // `schedule/change` 只在创建/删除时写进会话日志，未必以 session/event 广播出来。
+  // 先记一条：下次测试就能确定"是这条 Cordis 事件到、还是两者都不到"。
+  ctx.on('schedule/changed', () => {
+    pushRing(scheduleLog, { at: Date.now(), event: 'schedule/changed' })
+    log('[dsh-desktop-notify] 收到 schedule/changed（无载荷）')
+  })
+
   // ---- 后台任务（jobs）结束 ----
   // jobs 是可选服务：不能写进 export const inject（无 jobs 的组合会让整个插件不加载），
   // 也不能只在 apply 里 ctx.get 一次——cordis 对未 inject 的服务不会重跑 apply，
@@ -1439,8 +1481,19 @@ export function apply(ctx, config) {
       return
     }
     log('[dsh-desktop-notify] jobs service: hooked')
+    pushRing(jobLog, { at: Date.now(), type: 'hooked' })
     jobsCtx.effect(() => svc.events.subscribe({ owners: 'all' }, (event) => {
       try {
+        // 先记一条（环形）：某个后台任务没弹提醒时，能看出是"事件没来"还是"被后面三个条件挡了"
+        const evJob = (event && event.job) || {}
+        pushRing(jobLog, {
+          at: Date.now(),
+          type: String((event && event.type) || '?'),
+          job: String(evJob.id || ''),
+          status: String(evJob.status || ''),
+          awaited: !!(event && event.awaited),
+          kind: String(evJob.kind || ''),
+        })
         if (!event || event.type !== 'settled') return
         const job = event.job || {}
         // awaited = 有调用方在等这次结算，结果已经交给它了（旧的 reported 语义）
