@@ -2,6 +2,9 @@
 
 ## [未发布] - 2026-10-01
 
+- **新增：插件设置页**（挂 `plugins.row.config`，与 `dsh-path-guard` 同一做法）：总开关、调试模式、对外 API 开关，以及 **11 种预设推送各自的开关 + 静默模式**。宿主侧新增 schemastery `Config`（按官方 volatile 规则：整个数组 volatile、元素普通），并把所有开关改为**运行时重读**——设置页改完由 settings 服务原子写回 `cordis.patch.yml` 并原地重载，无需重启。
+- **新增：静默模式三档**（`session` 默认 / `tab` 标签页级 / `never`）。`tab` 用浏览器原生的"标签页可见且持焦点"这一级信号，是比会话级更安静的档位。
+- **变更：页面身份唯一化**。不再从 sessionStorage 复用 pageId（复制标签页会把 sessionStorage 一起复制，两个标签页争同一个身份，旧实现要等 200ms 探测窗口后才换）——现在每次加载生成全新 id，从源头消除该竞争窗口。
 - **对外 API 基线协议 v1.0.0**：服务上新增 `apiVersion` 与 `capabilities`（能力探测）；载荷可带 `v` 声明版本，**未知字段一律忽略**、更高主版本只回带 `unsupportedVersion` 而不中断推送；结果对象只增不改（新增 `apiVersion` / `unsupportedVersion`）。
 - **调试日志落文件**：`config.debug` 开启后状态日志写入 `$DSH_HOME/logs/dsh-desktop-notify/dsh-desktop-notify.log`（>1MB 轮转、保留 5 份），不再刷终端；同一文件也接住本插件 fiber 上的 cordis 日志（`ctx.logger.exporter`）。错误日志不变。
 - **修复**：启动播报等待时长配置 `startupWaitMs` 之前算出来却没用上（仍按默认 5s）——现在真正生效；自定义 `config.sender` 返回 rejected Promise 时同步 try/catch 抓不到、重试失效——现在归一成 Promise 再接住。

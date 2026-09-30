@@ -424,8 +424,8 @@ test('跳转结果回报：会话不在目录里时 POST /navigated（认领成�
   assert.equal(navBody.openId, 'op-9')
 })
 
-test('复制标签页身份碰撞：探到同 id 的活页面就换身份并重连 SSE', async () => {
-  // sessionStorage 里带着「复制标签页」继承来的身份
+test('页面身份唯一化：每次加载都生成全新 pageId，绝不复用 sessionStorage 里的旧值', async () => {
+  // sessionStorage 里放一个「复制标签页」会继承到的身份：新实现必须**忽略**它
   const storage = new Map([['dsh-notify-page-id', 'p-copied']])
   const page = createPage({ pluginNavigation: {}, storage })
   // 注入一个「另一个活页面」的 BroadcastChannel：收到探测就回 alive
@@ -442,7 +442,7 @@ test('复制标签页身份碰撞：探到同 id 的活页面就换身份并重�
   page.advance(400)     // 换身份 + 重连排在探测回调里，需要再推进一次
   await tick()
   // 骨架里 SSE 走的是假 EventSource（不产生 fetch），所以用"换身份后的重报"来观察：
-  // 探测到碰撞后必须用**新** pageId 重报一次身份。
+  // 身份唯一化之后不存在"碰撞 → 换身份"这条路径：上报用的 pageId 本来就不等于存储里的旧值。
   const reports = page.fetches.filter((f) => String(f.url).includes('dnotify/page-focus'))
   assert.ok(reports.length >= 1, '换身份后必须重报一次聚焦（否则宿主还以为旧身份代表本页）')
   const lastBody = JSON.parse(reports[reports.length - 1].init.body)
