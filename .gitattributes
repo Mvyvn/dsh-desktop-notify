@@ -1,0 +1,16 @@
+# 行尾固定：构建产物与源码一律 LF。
+#
+# 背景：Windows 上 core.autocrlf=true 时，检出把文本换成 CRLF，而 tsc 构建写出 LF，
+# 于是每次 npm test / npm run build 之后 `git status` 都会冒出 lib/*.js 两个"改动"，
+# 内容其实完全一致（git diff --numstat 为 0）。CI 的 `git diff --exit-code -- lib`
+# 门禁也会因此变得不稳定。这里把仓库内的行尾钉死，避免反复抖动。
+#
+# 注意：只钉文本文件；图标等二进制必须声明为 binary，否则会被当文本处理坏掉。
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.bundle binary
