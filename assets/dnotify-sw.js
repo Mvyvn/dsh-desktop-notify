@@ -101,6 +101,9 @@ self.addEventListener('message', (event) => {
     report({ kind: 'register', pageId: String(data.pageId), clientId: event.source.id })
   }
   // 页面要弹通知时顺手把身份也记下来（自愈：即使 register 那次丢了也能补上）
+  if (data.type === 'page-focus') {
+    lastFocusedPageId = data.focused === false ? '' : String(data.pageId || '')
+  }
   if (data.type === 'show-notification') {
     if (data.pageId && event.source && event.source.id) rememberPage(String(data.pageId), event.source.id)
     showNotification(data)
@@ -134,16 +137,41 @@ function isDshClient(client) {
   return url.indexOf('127.0.0.1:3080') >= 0 && url.indexOf('/dnotify/click') < 0
 }
 
+/** 最近一次处于聚焦状态的 pageId（页面 focus/blur 时主动告知）。 */
+let lastFocusedPageId = ''
+
+/**
+ * 选点击的目标标签页。规则（**全部基于证据，不猜**）：
+ *   1. 目标是 `page:…`（例如启动播报 → 设置/内置插件）：优先**你正在用的那个标签页** ——
+ *      这类目标与具体会话无关，任何 DSH 标签页都能自己导航过去；跳到"旧页面"反而突兀。
+ *   2. 目标是 `session:…`：优先**通知产生时那个页面**（它最可能已经持有该会话的上下文）。
+ *   3. 前两条落空时，依次退到"最近聚焦的标签页"→"**只有一个** DSH 窗口就直接用它"。
+ *      只有一个窗口时不存在歧义，不该新开 —— 这正好覆盖"启动瞬间页面还没注册完就点了通知"。
+ *   4. 仍然没有目标 → openWindow(深链) 新开（宁可新开，也不跳到错误的标签页）。
+ */
+function pickTargetClient(all, data, mappedId) {
+  const dshClients = all.filter(isDshClient)
+  const byId = (id) => (id ? all.find((c) => c.id === id) || null : null)
+  const lastFocusedClient = byId(lastFocusedPageId ? (pageClients.get(lastFocusedPageId) || null) : null)
+  const isPageTarget = String(data.target || '').indexOf('page:') === 0
+
+  if (isPageTarget && lastFocusedClient) return { target: lastFocusedClient, how: 'page-target-favors-focused-tab' }
+  const mapped = byId(mappedId)
+  if (mapped) return { target: mapped, how: 'by-pageId' }
+  if (lastFocusedClient) return { target: lastFocusedClient, how: 'by-last-focused-page' }
+  if (dshClients.length === 1) return { target: dshClients[0], how: 'only-dsh-client' }
+  return { target: null, how: mappedId ? 'target-client-gone' : 'no-mapping' }
+}
+
 async function focusTarget(data) {
   const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
   const pageId = String(data.pageId || '')
   let wantedId = pageId ? await recallPage(pageId) : null
-  let target = wantedId ? all.find((c) => c.id === wantedId) : null
-  let how = target ? 'by-pageId' : ''
+  let picked = pickTargetClient(all, data, wantedId)
 
-  if (!target && pageId) {
+  if (!picked.target && pageId) {
     // 映射缺失（SW 刚被回收、IndexedDB 不可用、或注册那次丢了）：先**问一轮**页面身份，
-    // 给一个很短的窗口；问到就用，问不到就新开 —— 绝不退化成"随便挑一个 DSH 标签页"。
+    // 给一个很短的窗口；问到就用，问不到再按规则退（绝不退化成"随便挑一个 DSH 标签页"）。
     await askPagesToReAnnounce()
     const deadline = Date.now() + 200
     while (Date.now() < deadline && !wantedId) {
@@ -152,11 +180,12 @@ async function focusTarget(data) {
     }
     if (wantedId) {
       const again = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-      target = again.find((c) => c.id === wantedId) || null
-      if (target) how = 'by-pageId-after-reannounce'
+      picked = pickTargetClient(again, data, wantedId)
+      if (picked.target) picked.how = picked.how + '-after-reannounce'
     }
   }
-  if (!target && !how) how = wantedId ? 'target-client-gone' : 'no-mapping'
+  const target = picked.target
+  const how = picked.how
   report({
     kind: 'click',
     pageId,

@@ -35,6 +35,7 @@ import { PageRegistry } from './pages.js'
 import { planActivation } from './activation.js'
 import { Config, resolveKindSettings } from './config.js'
 import { createFileSink, logDirFor } from './filelog.js'
+import { statSync } from 'node:fs'
 import { createBoundedMap, createDeduper } from './state.js'
 import { truncateText } from './text.js'
 import { startThemeWatch, stopThemeWatch } from './theme.js'
@@ -131,7 +132,67 @@ export function apply(ctx, config) {
   // ---- 运行时读取配置（不是 apply 时的快照）----
   // 设置页写入 profile 的 cordis.patch.yml 后 loader 会原地重载本插件，config 随之更新；
   // 因此每次决策都读一遍 —— 改设置立刻生效，不需要重启。
-  const cfgOf = (): any => (config && typeof config === 'object' ? config : {})
+  // 诊断：配置文件改了以后 loader 到底有没有**重跑 apply**（配置是否真的到达插件实例）。
+  // 构建指纹：本模块实际被加载的路径 + 文件 mtime（/status 里回显）。
+  // 若它与仓库里 lib/index.js 的 mtime 不一致，说明宿主加载的不是这份构建。
+  const buildStamp = (() => {
+    try {
+      const url = import.meta.url || ''
+      const file = url.startsWith('file:') ? fileURLToPath(url) : url
+      const st = statSync(file)
+      return { file, mtime: new Date(st.mtimeMs).toISOString(), size: st.size }
+    } catch (e) { return { file: String(import.meta.url || ''), mtime: '', size: 0 } }
+  })()
+
+  const applySerial = ((globalThis as any).__dshNotifyApplySerial = (((globalThis as any).__dshNotifyApplySerial) || 0) + 1)
+  const applyConfigSnapshot = JSON.stringify({
+    enabled: config && (config as any).enabled, debug: config && (config as any).debug, apiEnabled: config && (config as any).apiEnabled,
+  })
+  // ---- 进程级"最新实例"接管（热重载后旧实例可能仍持有路由/监听）----
+  // 现象：改代码后 /status 仍由**旧实例**回答（缺新字段），开关也只作用于旧配置。
+  // 原因：同一进程里 webServer 路由第二次注册会失败（日志里的"可能已注册"），旧路由继续服务。
+  // 处理：每个 apply 都把"当前实例"挂到 globalThis；路由处理器一律转交给**最新实例**，
+  // 总开关也以最新实例的 config 为准 —— 这样即使旧实例没被 dispose，也不会再影响行为。
+  const instanceId = (((globalThis as any).__dshNotifyInstanceSeq = (((globalThis as any).__dshNotifyInstanceSeq) || 0) + 1))
+  const isNewest = (): boolean => (globalThis as any).__dshNotifyInstance === instanceId
+  // 认领最新实例并把配置发布到进程级（旧实例读到的也是这份）
+  const publishConfig = (): void => {
+    try {
+      ;(globalThis as any).__dshNotifyInstance = instanceId
+      ;(globalThis as any).__dshNotifyConfig = {
+        enabled: (config as any)?.enabled !== false,
+        debug: (config as any)?.debug === true,
+        apiEnabled: (config as any)?.apiEnabled !== false,
+        types: Array.isArray((config as any)?.types) ? (config as any).types : [],
+      }
+      log(`[dsh-desktop-notify] 实例 #${instanceId} 已接管（enabled=${(config as any)?.enabled !== false}）`)
+    } catch (e) { /* ignore */ }
+  }
+  // apply 一开始就认领：先于任何通知/路由注册发生
+  publishConfig()
+
+  /**
+   * volatile 字段必须**每次读引用**，不能把 apply 参数里那份快照当准。
+   * 依据（DSH 源码）：`vendor/loader/src/config/entry.ts:139-155` —— 纯 volatile 变更走
+   * volatile-only 分支，只更新 volatile 引用，**不重启 fiber、不重跑 apply**；而
+   * `vendor/cosmokit/src/volatile.ts` 的语义是"值只对每次读 `config.x.get()` 的代码有效"。
+   * 设置页改开关正命中该分支 → 旧代码读快照 → 表现就是"关了还在推"。
+   */
+  const unwrapVolatile = (value: any): any => {
+    try {
+      if (value && typeof value === 'object' && typeof value.get === 'function') return value.get()
+      return value
+    } catch (e) { return value }
+  }
+  const cfgOf = (): any => {
+    // 总开关等关键判定：**优先采用最新实例**的配置（旧实例的 config 可能已过期）
+    const newest = (globalThis as any).__dshNotifyConfig
+    const mineRaw = config && typeof config === 'object' ? config : {}
+    const mine: Record<string, unknown> = {}
+    for (const key of Object.keys(mineRaw)) mine[key] = unwrapVolatile((mineRaw as any)[key])
+    if (isNewest() || !newest) return mine
+    return Object.assign({}, mine, newest)
+  }
   const masterOn = (): boolean => cfgOf().enabled !== false
   const apiOn = (): boolean => cfgOf().apiEnabled !== false
   const debugOn = (): boolean => cfgOf().debug === true
@@ -407,7 +468,7 @@ export function apply(ctx, config) {
     lastKnownPermission = state
     // 首次得知只记基线（"当前是 granted"不是一次变更，不该弹）；之后任何真实迁移都报
     if (prev === null || prev === state) return
-    const modeText = state === 'granted' ? '正常' : '降级'
+    const modeText = state === 'granted' ? '正常' : '降级（浏览器通知不可用）'
     const message = 'dsh-desktop-notify 跟踪到消息提醒权限变更为:' + state
       + '，插件运行模式同步变更为' + modeText
     // 去重键带迁移序号：去重窗口是为了吞掉"同一事件被重复派发"，不该吞掉真实的第二次迁移
@@ -483,7 +544,8 @@ export function apply(ctx, config) {
       if (recentSent.length > 12) recentSent.shift()
       if (click.wire === 'none') log(`[dsh-desktop-notify] 这条通知不可点击（无 click 目标）: ${item.title}`)
 
-      // ---- 混合 backend 的分流（唯一判定点）----
+  
+    // ---- 混合 backend 的分流（唯一判定点）----
       // 权限刚恢复成 granted 时这条"权限变更"必须走浏览器通知，但 pickNotifyPage() 可能先挑到
       // 另一个还停在旧状态的标签页（它按聚焦/最后聚焦排序）。所以入队时可带 preferPageId：
       // 那个页面在线且状态是 granted 就直接用它 —— 消除"恢复瞬间偶尔还降级一次"的竞态。
@@ -606,6 +668,12 @@ export function apply(ctx, config) {
 
   // 入队并按 200ms 间隔逐条发送（外部 API 的"绕过门控"路径也走这里）
   function enqueue(item) {
+    // 总开关是**所有**出口的闸门：notify() 会先查一次，但 pushAlways（对外 API）直接走这里，
+    // 这一层也必须拦 —— 否则"总开关关闭"对强制推送不生效。
+    if (!masterOn()) {
+      log('[dsh-desktop-notify] 总开关已关闭，丢弃通知: ' + String(item && item.title))
+      return false
+    }
     if (!hasSink) {
       sendToast(item)   // 交给 sendToast 打一次"无后端"的日志，不占队列
       return false
@@ -1156,6 +1224,17 @@ export function apply(ctx, config) {
         lastNavigate,
         lastSwReport,
         lastNotify,
+        // 宿主**实际生效**的配置（设置页写没写进来，一眼可查）
+        config: {
+          enabled: masterOn(),
+          debug: debugOn(),
+          apiEnabled: apiOn(),
+          // 诊断：apply 序号 + 本次 apply 拿到的原始 config（用于判断重载是否真的重跑 apply）
+          applySerial,
+          applyConfig: applyConfigSnapshot,
+          build: buildStamp,
+          types: kindMap(),
+        },
         notifyLog,
         eventLog,
         jobLog,
@@ -1769,5 +1848,5 @@ export function apply(ctx, config) {
   // 启动播报：每次进程启动只推一次（放在最后，确保所有监听/服务都已就绪）
   reportStartupOnce()
 
-  log(`[dsh-desktop-notify] plugin ready (${process.platform}, backend=${backend ? 'yes' : 'none'})`)
+  log(`[dsh-desktop-notify] plugin ready (${process.platform}, backend=${backend ? 'yes' : 'none'}) applySerial=${applySerial} config=${applyConfigSnapshot}`)
 }

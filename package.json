@@ -1,18 +1,24 @@
 {
   "name": "dsh-desktop-notify",
   "version": "1.8.10",
-  "description": "DSH桌面通知",
+  "description": "使用系统推送 DSH 的提醒",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
     "assets",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "assets/*.png",
+    "assets/*.ico",
+    "assets/*.js",
+    "locale/*.json",
+    "assets/*.svg"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.platform.json && tsc -p tsconfig.client.json",
@@ -72,5 +78,10 @@
   "devDependencies": {
     "@types/node": "^22.20.4",
     "typescript": "^6.0.3"
-  }
+  },
+  "meta": {
+    "title": "DSH 系统通知",
+    "description": "使用系统推送 DSH 的提醒"
+  },
+  "icon": "./assets/icon.svg"
 }

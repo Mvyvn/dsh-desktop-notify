@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="DSH 系统通知">
+  <!-- 极简、居中、全圆角：一个消息气泡 + 三个点 + 一个未读点。不用铃铛、不留锐角。 -->
+  <rect x="6" y="14" width="52" height="36" rx="18" fill="#4C6EF5"/>
+  <circle cx="22" cy="32" r="4.5" fill="#FFFFFF" opacity="0.6"/>
+  <circle cx="32" cy="32" r="4.5" fill="#FFFFFF"/>
+  <circle cx="42" cy="32" r="4.5" fill="#FFFFFF" opacity="0.6"/>
+  <circle cx="49" cy="18" r="7" fill="#FF5A5F" stroke="#FFFFFF" stroke-width="2.5"/>
+</svg>
