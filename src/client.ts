@@ -203,14 +203,25 @@
       try { return document.querySelector('[data-shortcut-modal="settings"]') } catch (e) { return null }
     }
     /** 打开插件面板（公开服务 pluginNavigation，退路 layout.selectPanel）。 */
+    /**
+     * 点完把焦点让出去：DSH 设置面板的导航格会留下 `:focus-visible` 的蓝白描边，
+     * 用户看到的就是"莫名其妙的蓝白色边框"。合成 click 本身不动焦点，但面板打开后的焦点管理
+     * 会落在第一个导航格上，所以处理完显式 blur 一次。
+     */
+    function blurActive(): void {
+      try {
+        var el: any = document.activeElement
+        if (el && typeof el.blur === 'function') el.blur()
+      } catch (e) { /* ignore */ }
+    }
     function openPluginsPanel(): boolean {
       var nav = clientService('pluginNavigation')
       if (nav && typeof nav.openBundle === 'function') {
-        try { nav.openBundle('dsh-desktop-notify'); return true } catch (e) { /* 试下一个 */ }
+        try { nav.openBundle('dsh-desktop-notify'); blurActive(); return true } catch (e) { /* 试下一个 */ }
       }
       var layout = clientService('layout')
       if (layout && typeof layout.selectPanel === 'function') {
-        try { layout.selectPanel('plugins'); return true } catch (e) { /* ignore */ }
+        try { layout.selectPanel('plugins'); blurActive(); return true } catch (e) { /* ignore */ }
       }
       return false
     }
