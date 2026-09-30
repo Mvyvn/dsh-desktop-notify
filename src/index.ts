@@ -646,8 +646,13 @@ export function apply(ctx, config) {
     const kindKey = String(options.kind || '')
     const kindCfg = kindKey ? kindMap()[kindKey] : null
     if (kindCfg && !kindCfg.enabled) return { queued: false, silenced: false, reason: 'kind-disabled' }
-    // 静默模式 never：不走门控（同文案去重仍然生效）
-    const silenced = kindCfg && kindCfg.silence === 'never' ? false : gate.silenced(sessionIds, Date.now())
+    // 静默模式：never 不走门控；tab 用浏览器原生的"标签页是否可见且持焦点"这一级；
+    // session（默认）走按会话的门控。三者都仍然受同文案去重约束。
+    const silenced = kindCfg && kindCfg.silence === 'never'
+      ? false
+      : (kindCfg && kindCfg.silence === 'tab'
+        ? !!pages.focusedLive(Date.now())
+        : gate.silenced(sessionIds, Date.now()))
     // "为什么这条提醒没弹"必须能查：把最近一次 notify 的判定结果留在 /status 里
     // （silenced=true 表示你正看着那个会话、被门控按设计静默；duplicate 表示去重窗口内重复）。
     lastNotify = {

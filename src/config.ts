@@ -28,8 +28,15 @@ export const NOTIFY_KINDS = [
 
 export type NotifyKind = (typeof NOTIFY_KINDS)[number]
 
-/** 静默模式：session = 按该通知的会话归属静默（默认）；never = 从不静默。 */
-export const SILENCE_MODES = ['session', 'never'] as const
+/**
+ * 静默模式三档：
+ *   session —— 按该通知的**会话**归属静默（默认；看住那个会话就不打扰）
+ *   tab     —— **标签页级**：只要任一 DSH 标签页可见且持有焦点（浏览器原生的
+ *              `document.hasFocus()` + `visibilityState`，由页面事件即时上报），就静默。
+ *              这是"看着 DSH 就别弹"的粗档，比 session 更安静。
+ *   never   —— 从不静默
+ */
+export const SILENCE_MODES = ['session', 'tab', 'never'] as const
 export type SilenceMode = (typeof SILENCE_MODES)[number]
 
 /** 每种通知的默认值（默认行为 = 加设置页之前的行为，升级不改变体感）。 */
