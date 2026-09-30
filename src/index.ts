@@ -33,6 +33,7 @@ import {
 } from './protocol.js'
 import { PageRegistry } from './pages.js'
 import { planActivation } from './activation.js'
+import { Config, resolveKindSettings } from './config.js'
 import { createFileSink, logDirFor } from './filelog.js'
 import { createBoundedMap, createDeduper } from './state.js'
 import { truncateText } from './text.js'
@@ -54,6 +55,8 @@ function sendToast(item) {
 }
 
 export const name = 'dsh-desktop-notify'
+// 设置页由 settings 服务按这份模式生成；只有 .volatile() 字段可写（见 src/config.ts）
+export { Config }
 // connection/timer/webServer 是必需服务；jobs/sessions/sessionTitle/agents/fs 都是可选的，
 // 一律用 ctx.get / ctx.inject 惰性取——写进 inject 会让缺服务的组合整个插件不加载。
 //
@@ -125,11 +128,19 @@ function safeJson(value: unknown): string {
 //   $DSH_HOME/logs/dsh-desktop-notify/dsh-desktop-notify.log（>1MB 轮转，保留 5 份）
 // 错误日志不受开关限制，仍然打到控制台（终端里能立刻看到出事）。
 export function apply(ctx, config) {
-  const DEBUG = !!(config && config.debug)
+  // ---- 运行时读取配置（不是 apply 时的快照）----
+  // 设置页写入 profile 的 cordis.patch.yml 后 loader 会原地重载本插件，config 随之更新；
+  // 因此每次决策都读一遍 —— 改设置立刻生效，不需要重启。
+  const cfgOf = (): any => (config && typeof config === 'object' ? config : {})
+  const masterOn = (): boolean => cfgOf().enabled !== false
+  const apiOn = (): boolean => cfgOf().apiEnabled !== false
+  const debugOn = (): boolean => cfgOf().debug === true
+  /** 每种推送的开关与静默模式（缺项回落默认，见 src/config.ts）。 */
+  const kindMap = (): Record<string, { enabled: boolean; silence: string }> => resolveKindSettings(cfgOf().types)
   const LOG_NAME = 'dsh-desktop-notify'
   const writeLog = createFileSink({ dir: logDirFor(LOG_NAME), name: `${LOG_NAME}.log` })
   const log = (...args) => {
-    if (!DEBUG) return
+    if (!debugOn()) return
     try {
       const parts = args.map((a) => (typeof a === 'string' ? a : safeJson(a)))
       writeLog(`${new Date().toISOString()} ${parts.join(' ')}`)
@@ -138,7 +149,7 @@ export function apply(ctx, config) {
   // 顺带把 cordis 自己的日志（本插件 fiber 上的）也接进同一个文件 —— 官方就是靠 exporter，
   // 它挂当前 fiber，插件卸载时自动移除。
   try {
-    if (DEBUG && ctx.logger && typeof ctx.logger.exporter === 'function') {
+    if (ctx.logger && typeof ctx.logger.exporter === 'function') {
       ctx.logger.exporter({
         levels: { default: 3 },
         export: (record) => {
@@ -402,7 +413,7 @@ export function apply(ctx, config) {
     // 去重键带迁移序号：去重窗口是为了吞掉"同一事件被重复派发"，不该吞掉真实的第二次迁移
     permissionSeq += 1
     notify('⚠️ DSH 权限变更', message, 'low', undefined,
-      { dedupeKey: 'degraded-notify:' + state + ':' + permissionSeq, preferPageId: state === 'granted' ? String(pageId || '') : '' })
+      { kind: 'permission', dedupeKey: 'degraded-notify:' + state + ':' + permissionSeq, preferPageId: state === 'granted' ? String(pageId || '') : '' })
   }
   /** 页面自报的通知权限（有界）：来自 /dnotify/sw/report 与每次 page-focus 上报。 */
   const pageNotify = createBoundedMap<string, { permission: string; at: number }>(64)
@@ -630,7 +641,13 @@ export function apply(ctx, config) {
   //   "不要跳转"；现在两者彻底分开——sessionId 只管门控，click 只管点击行为。
   function notify(title, message, urgency, sessionOrIds, options: any = {}) {
     const sessionIds = sessionIdList(sessionOrIds)
-    const silenced = gate.silenced(sessionIds, Date.now())
+    // 设置页的两个层级：总开关 → 每种推送的开关。关闭时留诊断、不入队。
+    if (!masterOn()) return { queued: false, silenced: false, reason: 'plugin-disabled' }
+    const kindKey = String(options.kind || '')
+    const kindCfg = kindKey ? kindMap()[kindKey] : null
+    if (kindCfg && !kindCfg.enabled) return { queued: false, silenced: false, reason: 'kind-disabled' }
+    // 静默模式 never：不走门控（同文案去重仍然生效）
+    const silenced = kindCfg && kindCfg.silence === 'never' ? false : gate.silenced(sessionIds, Date.now())
     // "为什么这条提醒没弹"必须能查：把最近一次 notify 的判定结果留在 /status 里
     // （silenced=true 表示你正看着那个会话、被门控按设计静默；duplicate 表示去重窗口内重复）。
     lastNotify = {
@@ -777,7 +794,7 @@ export function apply(ctx, config) {
         const mode = startupPage && startupPage.permission === 'granted' ? '正常' : '降级'
         notify(failed.length === 0 ? '🚀 DSH 插件挂载成功' : '⚠️ DSH 插件挂载异常',
           body + '，dsh-desktop-notify 运行模式：' + mode, failed.length === 0 ? 'low' : 'normal', undefined,
-          { dedupeKey: 'startup', click: clickPage('settings-plugins') })
+          { kind: 'startup', dedupeKey: 'startup', click: clickPage('settings-plugins') })
       })
     })()
   }
@@ -790,8 +807,9 @@ export function apply(ctx, config) {
   // ⚠️ 服务名可能已被上一轮加载注册（热更新/重复加载）：这时只记日志，不让整个插件挂掉。
   try {
     const disposeNotifyApi = ctx.provide('desktopNotify', createNotifyApi({
-      notify,
-      enqueue,
+      // 对外 API 开关（设置页）：关闭后其它插件的推送一律不入队，但仍如实返回原因
+      notify: (...args) => (apiOn() ? notify(...args) : { queued: false, reason: 'api-disabled' }),
+      enqueue: (item) => (apiOn() ? enqueue(item) : false),
     }))
     if (typeof disposeNotifyApi === 'function') ctx.effect(() => disposeNotifyApi)
   } catch (e) {
@@ -1454,7 +1472,7 @@ export function apply(ctx, config) {
         // 静默范围只认**这个会话本身**：哪怕你正看着它的母会话或子代理，这条也要推。
         // 点击目标仍指母会话（可用性），与静默判定分开。
         notify('🗜️ DSH 上下文已智能压缩', withPrefix(sessionTitleText(root || session), root || session, '上下文已智能压缩'),
-          'low', [session], { dedupeKey: 'compact:' + String(data.compactionId || ''), click: clickForSession(root || session) })
+          'low', [session], { kind: 'compaction', dedupeKey: 'compact:' + String(data.compactionId || ''), click: clickForSession(root || session) })
         return
       }
 
@@ -1467,7 +1485,7 @@ export function apply(ctx, config) {
         const root = rootSessionIdOf(session)
         const what = truncateText(String(schedule.title || schedule.prompt || schedule.id || '定时任务').replace(/\s+/g, ' ').trim(), 160)
         notify('⏰ DSH 定时任务已启动', withPrefix(sessionTitleText(root || session), root || session, what),
-          'low', [root || session], { dedupeKey: 'schedule:' + String(schedule.id || data.id || what), click: clickForSession(root || session) })
+          'low', [root || session], { kind: 'schedule', dedupeKey: 'schedule:' + String(schedule.id || data.id || what), click: clickForSession(root || session) })
         return
       }
 
@@ -1506,7 +1524,7 @@ export function apply(ctx, config) {
           const deniedRoot = rootSessionIdOf(session) || session
           notify('🚫 DSH 操作被自动拒绝',
             withPrefix(sessionTitleText(deniedRoot), deniedRoot, ((info as any).tool || '工具') + '-' + ((info as any).reason || '操作被自动拒绝')),
-            'normal', [session], { dedupeKey: 'approval:' + id, click: clickForSession(deniedRoot) })
+            'normal', [session], { kind: 'denied', dedupeKey: 'approval:' + id, click: clickForSession(deniedRoot) })
         }
       }
     } catch (e) {
@@ -1546,7 +1564,7 @@ export function apply(ctx, config) {
         // 去重键带会话（同一会话两次"完成"至少隔 3s 去抖，窗口内不可能重复），
         // 免得把"另一个会话恰好同前缀同结尾"的提醒当成重复丢掉。
         notify('✅ DSH 任务完成', withPrefix(title, agent.session, (entry as any).text || '任务已完成'),
-          'low', agent.session, { dedupeKey: 'session:' + sessionKey, click: clickForSession(agent.session) })
+          'low', agent.session, { kind: 'task', dedupeKey: 'session:' + sessionKey, click: clickForSession(agent.session) })
       }, 3000)
       state.pendingIdle.set(agentId, () => { try { cancel() } catch (e) { /* ignore */ } })
     } catch (e) {
@@ -1570,7 +1588,7 @@ export function apply(ctx, config) {
         const askRoot = rootSessionIdOf(session) || session
         notify('❓ DSH 等待你的输入',
           withPrefix(sessionTitleText(askRoot), askRoot, (h ? '[' + h + '] ' : '') + q),
-          'normal', [session], { dedupeKey: exec.callId ? 'ask:' + exec.callId : '', click: clickForSession(askRoot) })
+          'normal', [session], { kind: 'ask', dedupeKey: exec.callId ? 'ask:' + exec.callId : '', click: clickForSession(askRoot) })
       }
     } catch (e) {
       console.error('[dsh-desktop-notify] ask hook error:', e && e.message)
@@ -1592,7 +1610,7 @@ export function apply(ctx, config) {
       notify('🤖 DSH 后台子代理结束',
         withPrefix(mainTitle, main || subId, (sessionTitleText(subId) || subId || '后台子代理') + '已完成'),
         'low', [main, subId], {
-          dedupeKey: 'subagent:' + (info.runId || subId),
+          kind: 'subagent', dedupeKey: 'subagent:' + (info.runId || subId),
           click: clickForSession(main || subId),
         })
     } catch (e) { /* ignore */ }
@@ -1613,13 +1631,13 @@ export function apply(ctx, config) {
       const ref = change.ref || {}
       const goalKey = 'goal:' + String(ref.id || '') + ':' + String(ref.revision === undefined ? '' : ref.revision)
       if (change.operation === 'complete') {
-        notify('🎯 DSH 目标已完成', withPrefix(t, goalSession, objective + '-已完成'), 'normal', goalSession, { dedupeKey: goalKey, click: clickForSession(goalSession) })
+        notify('🎯 DSH 目标已完成', withPrefix(t, goalSession, objective + '-已完成'), 'normal', goalSession, { kind: 'goal', dedupeKey: goalKey, click: clickForSession(goalSession) })
       } else if (change.operation === 'block') {
         // blockedReason 是 { code, message } 对象（不是字符串）
         const br = goal.blockedReason
         notify('🎯 DSH 目标已阻塞',
           withPrefix(t, goalSession, objective + (br && br.message ? '-' + truncateText(br.message, 160) : '')),
-          'normal', goalSession, { dedupeKey: goalKey, click: clickForSession(goalSession) })
+          'normal', goalSession, { kind: 'goal', dedupeKey: goalKey, click: clickForSession(goalSession) })
       }
     } catch (e) { /* ignore */ }
   })
@@ -1669,7 +1687,7 @@ export function apply(ctx, config) {
         pushRing(scheduleLog, { at: Date.now(), event: 'delivered', id })
         // 静默范围 = 这个定时任务所属会话本身；点击目标才归一到母会话（可用性）
         notify('⏰ DSH 定时任务已启动', withPrefix(sessionTitleText(root), root, what),
-          'low', [session], { dedupeKey: 'schedule:' + id + ':' + delivery, click: clickForSession(root) })
+          'low', [session], { kind: 'schedule', dedupeKey: 'schedule:' + id + ':' + delivery, click: clickForSession(root) })
       }
       known = seen
     }
@@ -1738,7 +1756,7 @@ export function apply(ctx, config) {
           withPrefix(mainTitle, jobRoot || jobSession, label + suffix),
           status === 'failed' ? 'normal' : 'low',
           [jobRoot, jobSession].filter((v) => !!v), // 取不到会话归属时 notify 不静默（照常推送）
-          { dedupeKey, click: clickForSession(jobRoot || jobSession) })
+          { kind: 'jobs', dedupeKey, click: clickForSession(jobRoot || jobSession) })
       } catch (e) { /* ignore */ }
     }))
   })

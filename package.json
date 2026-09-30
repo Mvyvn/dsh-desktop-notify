@@ -25,10 +25,14 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4",
     "koffi": "^3.3.2"
   },
   "peerDependencies": {
