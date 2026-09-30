@@ -363,17 +363,17 @@ test('点击三态①：目标为空 → 不投递、不打开（不可点击通
   assert.deepEqual(JSON.parse(claim.body), { ok: false, reason: 'stale' }, '不该产生待认领条目')
 })
 
-test('点击三态②：有可投递页面 → 只推给那个页面，且不产生任何打开动作', async () => {
+test('点击（降级模式）：一律 302 到 DSH 深链，新开标签页跳转，不再投递给已有页面', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   const tabA = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pA' })
   const tabB = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   // 两个页面都开着，用户最后在 A 上操作
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  const { click, claim } = await clickAndClaim(h, `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}`, tabA, 'pA')
-  assert.equal(click.status, 200, '有页面时走落地页，不 302')
-  assert.equal(claim.target, 'session:s1')
-  assert.match(tabA.res.chunks.join(''), /event: navigate/, '聚焦的页面应收到')
-  assert.ok(!/event: navigate/.test(tabB.res.chunks.join('')), '其它页面收不到（不广播、不靠抢）')
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  assert.equal(click.status, 302, '降级模式点击一律 302：由浏览器新开标签页跳 DSH')
+  assert.match(String(click.headers.location || ''), /#dsh-notify=/, '深链要带目标会话')
+  assert.ok(!/event: navigate/.test(tabA.res.chunks.join('')), '点击不再向页面投递（投递已前移到发送时）')
+  assert.ok(!/event: navigate/.test(tabB.res.chunks.join('')), '更不会广播')
 })
 
 test('点击三态③：没有可投递页面 → 302 到 DSH 深链（由浏览器拉起 DSH）', async () => {
@@ -410,12 +410,10 @@ test('点击落地页：跨站触发被拒（403），旧令牌仍放行（用�
   assert.equal(crossSite.status, 403)
   assert.equal(crossSite.body, 'forbidden')
 
-  // 旧令牌（上一次运行发出的通知）：按用户导航放行（有一个可投递页面 → 正常投递）
-  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
-  const { click: stale } = await clickAndClaim(h, '/dnotify/click?t=stale-token&raw=session%3As9', stream, 'p1')
-  assert.equal(stale.status, 200, '不该回 forbidden')
-  assert.match(stale.body, /已通知 DSH 切换/)
+  // 旧令牌（上一次运行发出的通知）：按用户导航放行（降级模式 → 302 深链，而不是 403）
+  const stale = await h.request({ method: 'GET', url: '/dnotify/click?t=stale-token&raw=session%3As9' })
+  assert.equal(stale.status, 302, '不该回 forbidden')
+  assert.match(String(stale.headers.location || ''), /#dsh-notify=/)
 })
 
 test('点击令牌在同一进程内跨 apply 复用（热更新不会让已发出的通知失效）', async () => {
@@ -567,7 +565,7 @@ test('点击投递：每次点击有唯一 openId，连点两条不会串单', a
   const claims = []
   for (const target of ['session:s1', 'session:s2']) {
     // 像真实客户端：点击请求会等认领，所以先并发发起，再认领，最后收结果
-    const pending = h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent(target)}` })
+    const pending = h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent(target)}` })
     await new Promise((resolve) => setTimeout(resolve, 10))
     const openId = envelopeIds(stream).pop()
     ids.push(openId)
@@ -588,7 +586,7 @@ test('归属校验：非目标页面即使拿到 openId 也不能认领', async 
   const tabA = await h.request({ method: 'GET', url: '/dnotify/events?pageId=pA' })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=pB' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'pA', sessionId: 's1' } })
-  const pendingClick = h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  const pendingClick = h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s1')}` })
   await new Promise((resolve) => setTimeout(resolve, 10))
   const openId = envelopeId(tabA)
   const stolen = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'pB', openId } })).body)
@@ -605,7 +603,7 @@ test('页面注册表：失焦后仍投给"最后用过"的页面（用户此刻
   // A 聚焦（seq=5）→ 然后失焦（seq=6）：此刻**没有**聚焦页面，但"最后用过"仍是 A
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 5, pageId: 'pA', sessionId: 's1' } })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: false, seq: 6, pageId: 'pA', sessionId: 's1' } })
-  await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s1')}` })
+  await h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s1')}` })
   assert.match(tabA.res.chunks.join(''), /event: navigate/, '切去别的应用后仍应投给"最后用的那个页面"')
   assert.ok(!/event: navigate/.test(tabB.res.chunks.join('')), 'B 从来没被聚焦过，不该收到')
 })
@@ -618,7 +616,7 @@ test('页面注册表：同一页面的旧 seq 上报不覆盖新状态', async 
   // 乱序到达的旧状态（seq=9 声称失焦）：必须是 stale，不能把 B 的聚焦状态抹掉
   const late = await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: false, seq: 9, pageId: 'pB', sessionId: 's2' } })
   assert.equal(JSON.parse(late.body).verdict, 'stale')
-  await h.request({ method: 'GET', url: `/dnotify/click?t=x&raw=${encodeURIComponent('session:s2')}` })
+  await h.request({ method: 'GET', url: `/dnotify/activate?t=x&raw=${encodeURIComponent('session:s2')}` })
   assert.match(tabB.res.chunks.join(''), /event: navigate/, 'B 仍应是目标页面')
 })
 
@@ -629,7 +627,7 @@ test('SSE：连接的页面立刻拿到该投给自己的跳转，未知端点 4
   assert.match(String(stream.headers['content-type']), /text\/event-stream/)
   assert.match(stream.res.chunks.join(''), /retry: 2000/)
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
-  const { click } = await clickAndClaim(h, `/dnotify/click?t=x&raw=${encodeURIComponent('page:plugins')}`, stream, 'p1')
+  const { click } = await clickAndClaim(h, `/dnotify/activate?t=x&raw=${encodeURIComponent('page:plugins')}`, stream, 'p1')
   assert.equal(click.status, 200)
   assert.match(stream.res.chunks.join(''), /event: navigate/)
   assert.match(stream.res.chunks.join(''), /page:plugins/)
@@ -671,9 +669,32 @@ test('投递后没人认领 → 不静默失败，改成新开深链', async () 
   assert.match(String(activate.url), /#dsh-notify=session%3As1$/)
   assert.equal(activate.reason, 'unclaimed')
   assert.match(tab.res.chunks.join(''), /event: navigate/, '消息仍然推给了页面（它自己慢一步也没关系）')
-  // 浏览器落地页同理：没认领就 302，而不是显示"已通知 DSH 切换"
-  const click = await h.request({ method: 'GET', url: '/dnotify/click?t=x&raw=session%3As1' })
-  assert.equal(click.status, 302)
+  // 协议激活端点（claim 语义在这里）：没人认领 → 回 open + 深链，而不是静默失败
+  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=session%3As1' })
+  assert.equal(click.status, 200)
+  const openBody = JSON.parse(click.body)
+  assert.equal(openBody.action, 'open')
+  assert.match(String(openBody.url || ''), /#dsh-notify=/)
+})
+
+test('混合 backend 分流：页面在线且权限 granted → 浏览器通知；否则原生 Toast + 降级提示', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
+
+  // ① 页面还没报告通知权限 → 只能走原生 Toast，并且正文里必须说明"降级模式"
+  h.services.desktopNotify.pushAlways({ title: '第一条', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  assert.equal(h.sent.length, 1, '没有浏览器通知权限时用原生 Toast')
+  assert.match(String(h.sent[0].message || ''), /降级模式/, '要告诉用户正处于降级模式以及原因')
+
+  // ② 页面报告权限 granted → 改走浏览器通知，且**不再**发原生 Toast（避免重复打扰）
+  await h.request({ method: 'POST', url: '/dnotify/sw/report', body: { from: 'page', kind: 'register', pageId: 'p1', permission: 'granted' } })
+  h.services.desktopNotify.pushAlways({ title: '第二条', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  assert.equal(h.sent.length, 1, '有权限时不再发原生 Toast')
+  assert.match(stream.res.chunks.join(''), /event: notify/, '内容通过 notify 事件交给页面（页面再交给 SW 显示）')
+  assert.match(stream.res.chunks.join(''), /session:s1/, '点击目标要随通知一起带过去')
 })
 
 test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', async () => {
@@ -698,9 +719,10 @@ test('SSE：流断开后不再推送，也不会因为心跳而报错', async ()
   const h = await start({ roots: [ROOT_AGENT] })
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   stream.res.emit('close')   // 页面关闭：摘掉订阅 + 停掉心跳
-  // 断开后没有可投递页面 → 点击走 302 兜底（把浏览器送去 DSH 的 hash 深链），不再挂起
-  const click = await h.request({ method: 'GET', url: '/dnotify/click?t=x&raw=' + encodeURIComponent('page:plugins') })
-  assert.equal(click.status, 302, '断开后新点击不应把路由打挂')
+  // 断开后没有可投递页面 → 协议激活端点回 open + 深链兜底，不再挂起
+  const click = await h.request({ method: 'GET', url: '/dnotify/activate?t=x&raw=' + encodeURIComponent('page:plugins') })
+  assert.equal(click.status, 200, '断开后新点击不应把路由打挂')
+  assert.equal(JSON.parse(click.body).action, 'open')
   const claim = await h.request({ method: 'POST', url: '/dnotify/claim', body: { pageId: 'p1', openId: 'x' } })
   assert.deepEqual(JSON.parse(claim.body), { ok: false, reason: 'stale' }, '302 后不该有待认领条目')
 })

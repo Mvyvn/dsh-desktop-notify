@@ -309,6 +309,31 @@ export function apply(ctx, config) {
   // 队列里存的是 **ClickTarget**（`{type:…}`），这里统一转成平台要的**启动描述**
   // （wire/open/scheme/activate/fallback 三套地址）。放在 fire 里而不是 notify 里，
   // 是因为 pushAlways 会绕过 notify 直接入队——两处各转一次必然漂移。
+  //
+  // 分流（混合 backend，唯一的判定点）：
+  //   有在线 DSH 页面 **且** 它的通知权限是 granted → 走浏览器自己的通知（页面 → SW → showNotification）
+  //      点击 = SW 的 notificationclick → clients.matchAll() → WindowClient.focus()
+  //      ⇒ 前台/后台都由浏览器自己处理，没有中转页、没有 UIA、没有外部进程
+  //   其余情况 → 原生 Toast（点击打开 DSH 深链），并在正文里标明"降级模式"
+  /** 页面自报的通知权限（有界）：来自 /dnotify/sw/report 的 register/permission 记录。 */
+  const pageNotify = createBoundedMap<string, { permission: string; at: number }>(64)
+  function pickNotifyPage(): { pageId: string; permission: string } | null {
+    const now = Date.now()
+    const snap = pages.focusedLive(now) ?? pages.lastFocusedLive(now)
+    if (!snap || !snap.pageId) return null
+    const rec = pageNotify.get(String(snap.pageId))
+    return { pageId: String(snap.pageId), permission: rec ? rec.permission : 'unknown' }
+  }
+  /** 把通知内容交给那个页面（页面再交给 SW 显示）；返回是否至少推给了一条连接。 */
+  function deliverNotifyToPage(pageId: string, envelope: any): number {
+    const payload = `event: notify\ndata: ${JSON.stringify(envelope)}\n\n`
+    let sent = 0
+    for (const [res, meta] of [...openStreams]) {
+      if (meta.pageId !== pageId) continue
+      try { res.write(payload); sent += 1 } catch (e) { dropStream(res) }
+    }
+    return sent
+  }
   function fire(item) {
     log(`[dsh-desktop-notify] fire -> ${process.platform}:`, item.title)
     try {
@@ -319,9 +344,34 @@ export function apply(ctx, config) {
       recentSent.push({ at: Date.now(), title: item.title, wire: click.wire, launch: click.scheme || click.fallback || '' })
       if (recentSent.length > 12) recentSent.shift()
       if (click.wire === 'none') log(`[dsh-desktop-notify] 这条通知不可点击（无 click 目标）: ${item.title}`)
+
+      // ---- 混合 backend 的分流（唯一判定点）----
+      const pick = pickNotifyPage()
+      const web = !!(pick && pick.permission === 'granted')
+      if (web) {
+        const id = 'n-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
+        const sent = deliverNotifyToPage(pick.pageId, {
+          id,
+          title: String(item.title || 'DSH 通知'),
+          body: String(item.message || ''),
+          tag: id,
+          target: click.wire,
+          deepLink: click.scheme || click.fallback || '',
+        })
+        if (sent > 0) {
+          log(`[dsh-desktop-notify] 走浏览器通知（页面 ${pick.pageId.slice(0, 8)}）: ${item.title}`)
+          return
+        }
+        log('[dsh-desktop-notify] 页面在，但通知没推出去（连接刚断？），降级为原生 Toast')
+      }
+
+      // 降级：没有在线页面，或页面没有通知权限 → 原生 Toast，并在正文里说明降级原因
+      const degraded = !web && !!pick
       sink({
         title: item.title,
-        message: item.message || '',
+        message: degraded
+          ? String(item.message || '') + '\n（降级模式：浏览器通知不可用，点击将新开标签页跳转）'
+          : (item.message || ''),
         urgency: item.urgency,
         click,
       })
@@ -748,18 +798,27 @@ export function apply(ctx, config) {
         res.end(clickLandingPage(raw, '这条通知的跳转目标无法识别'))
         return
       }
-      const { plan, envelope } = activate(target)
+      // 混合 backend：**只有降级模式才会产生原生 Toast**（有页面且权限 granted 时走浏览器通知，
+      // 那条路上的点击由浏览器自己的 SW 处理，根本不会到这里）。所以这里一律新开标签页跳深链。
+      // 刻意**不**调用 activate()：那会顺带把 navigate 事件投给已有页面，而新架构里
+      // "投递"已经前移到**发送时**（走 notify 事件给页面 → SW 显示通知）。
+      if (needsDshPage(target)) {
+        const url2 = appUrlFor(target)
+        lastActivate = { at: Date.now(), raw, action: 'open', pageId: '', url: url2 }
+        log(`[dsh-desktop-notify] click -> 降级模式：新开标签页跳到 ${url2}`)
+        res.writeHead(302, { location: url2, 'cache-control': 'no-store' })
+        res.end()
+        return
+      }
+      const { plan } = activate(target)
       lastActivate = { at: Date.now(), raw, action: plan.action, pageId: plan.pageId || '', url: plan.url || '' }
       if (plan.action === 'deliver') {
-        // "写进 socket" 不等于"页面跳了"：等认领，等不到就改成新开（见 confirmDelivery）
-        if (await confirmDelivery(envelope, CLAIM_WAIT_MS)) {
-          log(`[dsh-desktop-notify] click -> ${envelope.target} 投递给页面 ${plan.pageId} 并已认领`)
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(clickLandingPage(envelope.target, '已通知 DSH 切换（这个标签页可以关掉）'))
-          return
-        }
-        log('[dsh-desktop-notify] click -> 页面未认领，改走深链新开')
-        res.writeHead(302, { location: appUrlFor(target), 'cache-control': 'no-store' })
+        // 混合 backend 下，**只有降级模式才会产生原生 Toast**（有页面且权限 granted 时走浏览器通知，
+        // 那条路上的点击由浏览器自己的 SW 处理，根本不会到这里）。
+        // 所以这里一律新开标签页跳到 DSH 深链：不关心是否已有 DSH 标签页，也不再有"关不掉的中转页"。
+        const url2 = appUrlFor(target)
+        log(`[dsh-desktop-notify] click -> 降级模式：新开标签页跳到 ${url2}`)
+        res.writeHead(302, { location: url2, 'cache-control': 'no-store' })
         res.end()
         return
       }
@@ -919,6 +978,10 @@ export function apply(ctx, config) {
       // SW 与页面把每一步结果写到这里（成功/失败/降级原因都留痕，不再无声）
       const body = await readJsonBody(req)
       lastSwReport = { at: Date.now(), ...(body || {}) }
+      // 顺便记下"这个页面的通知权限"：分流要靠它决定走浏览器通知还是降级到原生 Toast
+      const rid = lastSwReport.pageId ? String(lastSwReport.pageId) : ''
+      const perm = lastSwReport.permission !== undefined ? String(lastSwReport.permission) : (lastSwReport.state !== undefined ? String(lastSwReport.state) : '')
+      if (rid && perm) pageNotify.set(rid, { permission: perm, at: Date.now() })
       log(`[dsh-desktop-notify] SW: ${JSON.stringify(lastSwReport)}`)
       json(res, 200, { ok: true })
       return
