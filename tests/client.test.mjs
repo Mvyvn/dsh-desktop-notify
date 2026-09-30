@@ -424,6 +424,32 @@ test('跳转结果回报：会话不在目录里时 POST /navigated（认领成�
   assert.equal(navBody.openId, 'op-9')
 })
 
+test('复制标签页身份碰撞：探到同 id 的活页面就换身份并重连 SSE', async () => {
+  // sessionStorage 里带着「复制标签页」继承来的身份
+  const storage = new Map([['dsh-notify-page-id', 'p-copied']])
+  const page = createPage({ pluginNavigation: {}, storage })
+  // 注入一个「另一个活页面」的 BroadcastChannel：收到探测就回 alive
+  page.window.BroadcastChannel = function FakeBC() {
+    this.onmessage = null
+    this.postMessage = (m) => { if (m && m.probe && this.onmessage) this.onmessage({ data: { alive: m.probe } }) }
+    this.close = () => {}
+    this.unref = () => {}
+  }
+  page.exports.apply(page.ctx)
+  await tick()
+  page.advance(400)     // 探测窗口 200ms
+  await tick()
+  page.advance(400)     // 换身份 + 重连排在探测回调里，需要再推进一次
+  await tick()
+  // 骨架里 SSE 走的是假 EventSource（不产生 fetch），所以用"换身份后的重报"来观察：
+  // 探测到碰撞后必须用**新** pageId 重报一次身份。
+  const reports = page.fetches.filter((f) => String(f.url).includes('dnotify/page-focus'))
+  assert.ok(reports.length >= 1, '换身份后必须重报一次聚焦（否则宿主还以为旧身份代表本页）')
+  const lastBody = JSON.parse(reports[reports.length - 1].init.body)
+  assert.ok(!/p-copied/.test(String(lastBody.pageId)), '重报必须用新身份，不能再和另一个标签页共用 id')
+  assert.notEqual(String(lastBody.pageId), 'p-copied')
+})
+
 test('设置弹窗先出现、导航格后渲染：要等到「内置插件」而不是停在设置页', async () => {
   let cell = null
   const modal = { querySelectorAll: () => [element('通用')].concat(cell ? [cell] : []) }

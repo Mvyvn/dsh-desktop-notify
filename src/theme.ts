@@ -15,6 +15,21 @@
 // 对外只暴露：currentTheme() / startThemeWatch() / stopThemeWatch() / onThemeChange()。
 
 import { THEME_DARK, THEME_LIGHT, normalizeTheme } from './theme-codec.js'
+/** 主题读取的硬上限：后端（portal/D-Bus/注册表）卡住时也必须给调用方一个结论。 */
+const THEME_READ_DEADLINE_MS = 6000
+
+/** 给任意 Promise 加硬上限；超时或失败都返回 fallback（并吞掉原 Promise 的错误，避免 unhandled rejection）。 */
+function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => { if (!settled) { settled = true; resolve(fallback) } }, ms)
+    p.then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v) } },
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve(fallback) } },
+    )
+  })
+}
+
 
 export { THEME_DARK, THEME_LIGHT }
 
@@ -117,7 +132,7 @@ export async function refreshTheme(options = {}) {
   const generationAtStart = themeGeneration
   let theme = null
   try {
-    theme = await backend.read()
+    theme = await withDeadline(backend.read(), THEME_READ_DEADLINE_MS, null)
     if (themeGeneration !== generationAtStart) {
       return null   // 期间已有更新的事件结论：保留它
     }
