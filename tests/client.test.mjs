@@ -484,9 +484,9 @@ test('DSH 桌面端不合成设置快捷键（快捷键由原生输入接管）'
   page.advance(700)     // 桌面端：跳过两段快捷键，只走 launcher → 菜单
   await tick()
   assert.equal(page.state.keyboardEvents.length, 0, '桌面端合成 keydown 不会触发命令，不该白等')
-  page.advance(1800)    // 走完剩余各段 → 退到能用的插件面板
+  page.advance(1800)    // 走完剩余各段
   await tick()
-  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'], '最后仍要退到能用的插件面板')
+  assert.deepEqual(page.opened, [], '桌面端打不开设置时不退到侧栏插件页（落点错了就是错）')
 })
 
 test('跳转 page:settings-plugins → 点真实设置入口打开设置并点「内置插件」', async () => {
@@ -541,7 +541,7 @@ test('跳转 page:settings-plugins → 没有真实入口时合成快捷键（we
   assert.equal(cell.clicks, 1, '应点开「内置插件」')
 })
 
-test('跳转 page:settings-plugins：设置打不开就退回插件面板', async () => {
+test('跳转 page:settings-plugins：设置打不开也**不退**到侧栏插件面板（落点错了就是错）', async () => {
   const page = createPage({
     pluginNavigation: {},
     responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
@@ -550,9 +550,9 @@ test('跳转 page:settings-plugins：设置打不开就退回插件面板', asyn
   await tick()
   page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
-  page.advance(5000)    // 40 次轮询后放弃 → 退路
+  page.advance(5000)    // 40 次轮询后放弃
   await tick()
-  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+  assert.deepEqual(page.opened, [], '目标是"设置 → 内置插件"；落到侧栏「插件」页是错的，宁可不动作')
 })
 
 test('旧式 hash 深链仍可用（#dsh-notify=…，处理完清掉 hash）', async () => {
