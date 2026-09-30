@@ -148,6 +148,8 @@ dsh-desktop-notify/
 └── package.json
 ```
 
+> 验证：每次提交由 Linux CI 跑（语法 / 单测 / TS→lib 一致性 / 主题 / 清单）；发布前在真机上跑 Windows 与 Linux 的 smoke —— 清单见 [docs/verification.md](docs/verification.md)。
+
 > 构建：`npm run build`（三个配置：`tsconfig.json` 核心层 strict → `tsconfig.platform.json` 平台层 → `tsconfig.client.json` 浏览器半区按脚本编译）。`npm test` 会先自动构建；提交时请一并提交 `lib/` 下的构建产物（插件运行时直接加载 `lib/`，DSH 不做编译）。迁移进度见 [docs/migration-ts6-ts7.md](docs/migration-ts6-ts7.md)。
 
 ## 工作机制与限制
