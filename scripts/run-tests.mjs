@@ -19,7 +19,9 @@ if (files.length === 0) {
   process.exit(1)
 }
 
-const result = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' })
+// `--test-reporter=spec` 让每个测试**边跑边打印**：真出现挂死时，日志最后一行就是卡住的那个
+// （默认 reporter 只在全部结束时汇总，挂死时什么都看不到——CI 上曾为此白烧 6 小时）。
+const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', ...files], { stdio: 'inherit' })
 if (result.error) {
   console.error('[dsh-desktop-notify] 无法启动 node --test:', result.error.message)
   process.exit(1)

@@ -497,6 +497,23 @@ test('定时任务：create 才通知（delete/dispatch 不打扰）', async () 
   assert.equal(h.sent[0].click.wire, 'session:s1')
 })
 
+test('门控也吃 seq 乱序保护：stale 的上报不许改门控状态', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  const token = globalThis.__dshDesktopNotifyClickToken
+  // 新上报 seq=10 聚焦
+  const fresh = await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 10, pageId: 'p1', sessionId: 's1' } })
+  assert.equal(JSON.parse(fresh.body).verdict, 'accepted')
+  const gateAfterFocus = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/status?t=' + token })).body).gate
+  assert.equal(gateAfterFocus, 1, '聚焦后门控应记住这个页面')
+  // 乱序到达的旧上报 seq=9 失焦：注册表忽略它，门控也必须忽略
+  const stale = await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: false, seq: 9, pageId: 'p1', sessionId: 's1' } })
+  const payload = JSON.parse(stale.body)
+  assert.equal(payload.verdict, 'stale')
+  assert.equal(payload.gate, 1, 'stale 的上报绝不能把门控清掉（否则该静默的通知会重新弹）')
+  const st = JSON.parse((await h.request({ method: 'GET', url: '/dnotify/status?t=' + token })).body)
+  assert.equal(st.gate, 1, '/status 里门控仍是 1')
+})
+
 test('跳转结果回报：认领成功但客户端跳不过去时，记录进 /status', async () => {
   const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
   const ack = await h.request({

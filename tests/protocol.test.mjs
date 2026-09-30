@@ -36,6 +36,19 @@ test('解码：严格白名单，认不出就是 null', () => {
   assert.equal(decodeClickTarget('dsh-notify:session:s1'), null, '带 scheme 的完整 URI 不由这一层处理')
 })
 
+test('clickUrl：空壳 URL 必须挡掉（协议前缀正则不够）', () => {
+  // 这些都能过 /^https?:\/\//，但系统打开必然失败 → 不该成为可点击目标
+  assert.equal(clickUrl('http://'), null)
+  assert.equal(clickUrl('https://'), null)
+  assert.equal(clickUrl('https://not a valid url'), null)
+  assert.equal(clickUrl('https://[invalid'), null)
+  assert.equal(clickUrl('file:///C:/x'), null)
+  assert.equal(clickUrl('javascript:alert(1)'), null)
+  // 正常地址仍然通过，且**保持原串**（规范化会补尾斜杠，改变既有线格式）
+  assert.deepEqual(clickUrl('https://example.com'), { type: 'url', url: 'https://example.com' })
+  assert.deepEqual(clickUrl('  http://127.0.0.1:3080/x?y=1  '), { type: 'url', url: 'http://127.0.0.1:3080/x?y=1' })
+})
+
 test('clickUrl：只接受 http(s) 且长度合理', () => {
   assert.deepEqual(clickUrl('  https://example.com  '), { type: 'url', url: 'https://example.com' })
   assert.equal(clickUrl('ftp://example.com'), null)

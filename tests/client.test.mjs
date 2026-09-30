@@ -424,6 +424,27 @@ test('跳转结果回报：会话不在目录里时 POST /navigated（认领成�
   assert.equal(navBody.openId, 'op-9')
 })
 
+test('设置弹窗先出现、导航格后渲染：要等到「内置插件」而不是停在设置页', async () => {
+  let cell = null
+  const modal = { querySelectorAll: () => [element('通用')].concat(cell ? [cell] : []) }
+  const page = createPage({
+    pluginNavigation: {},
+    responses: { 'dnotify/claim': () => ({ ok: true, target: 'page:settings-plugins' }) },
+  })
+  page.exports.apply(page.ctx)
+  await tick()
+  page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored' }))
+  await tick()
+  page.setSettingsModal(modal)   // 弹窗有了，但导航格还没渲染
+  page.advance(300)
+  await tick()
+  assert.deepEqual(page.opened, [], '还没渲染出导航格时不该退到插件面板')
+  cell = element('内置插件')      // 导航格延迟渲染出来
+  page.advance(300)
+  await tick()
+  assert.equal(cell.clicks, 1, '等到导航格出现后必须点它')
+})
+
 test('DSH 桌面端不合成设置快捷键（快捷键由原生输入接管）', async () => {
   const page = createPage({
     desktopPlatform: 'win32',
