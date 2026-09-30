@@ -450,7 +450,7 @@ test('团队任务：pending/completed 各弹一次，重复同状态不再打�
   emitTask('pending')
   h.advance(400)
   assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '🕒 团队任务待处理')
+  assert.equal(h.sent[0].title, '🕒 DSH 团队任务待处理')
   assert.match(h.sent[0].message, /实现登录页/)
   assert.equal(h.sent[0].click.wire, 'session:root-1', '点击回到母会话')
   emitTask('pending')            // 同一状态重复派发
@@ -462,7 +462,7 @@ test('团队任务：pending/completed 各弹一次，重复同状态不再打�
   emitTask('completed')
   h.advance(400)
   assert.equal(h.sent.length, 2)
-  assert.equal(h.sent[1].title, '✅ 团队任务已完成')
+  assert.equal(h.sent[1].title, '✅ DSH 团队任务已完成')
 })
 
 test('上下文压缩：compaction/end 无 error 才通知', async () => {
@@ -473,7 +473,7 @@ test('上下文压缩：compaction/end 无 error 才通知', async () => {
   h.emit('session/event', ROOT_AGENT.session, { type: 'compaction/end', data: { compactionId: 'c1', turn: 1 } })
   h.advance(400)
   assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '🗜️ 上下文已智能压缩')
+  assert.equal(h.sent[0].title, '🗜️ DSH 上下文已智能压缩')
   assert.match(h.sent[0].message, /上下文已智能压缩/)
   assert.equal(h.sent[0].click.wire, 'session:s1')
   h.emit('session/event', ROOT_AGENT.session, { type: 'compaction/end', data: { compactionId: 'c2', turn: 2, error: 'boom' } })
@@ -490,7 +490,7 @@ test('定时任务：create 才通知（delete/dispatch 不打扰）', async () 
     data: { version: 1, operation: 'create', schedule: { id: 'sched-1', title: '每天早上跑测试' } } })
   h.advance(400)
   assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '⏰ 定时任务已启动')
+  assert.equal(h.sent[0].title, '⏰ DSH 定时任务已启动')
   assert.match(h.sent[0].message, /每天早上跑测试/)
   assert.equal(h.sent[0].click.wire, 'session:s1')
 })
@@ -682,11 +682,11 @@ test('混合 backend 分流：页面在线且权限 granted → 浏览器通知�
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1' } })
 
-  // ① 页面还没报告通知权限 → 只能走原生 Toast，并且正文里必须说明"降级模式"
+  // ① 页面还没报告通知权限 → 只能走原生 Toast（正文不再挂降级后缀）
   h.services.desktopNotify.pushAlways({ title: '第一条', sessionId: 's1', click: { type: 'session', sessionId: 's1' } })
   h.advance(600)
   assert.equal(h.sent.length, 1, '没有浏览器通知权限时用原生 Toast')
-  assert.match(String(h.sent[0].message || ''), /降级模式/, '要告诉用户正处于降级模式以及原因')
+  assert.doesNotMatch(String(h.sent[0].message || ''), /降级模式/, '普通通知不再挂降级后缀（运行模式只在启动播报里说明）')
 
   // ② 页面报告权限 granted → 改走浏览器通知，且**不再**发原生 Toast（避免重复打扰）
   await h.request({ method: 'POST', url: '/dnotify/sw/report', body: { from: 'page', kind: 'register', pageId: 'p1', permission: 'granted' } })
@@ -765,7 +765,7 @@ test('审批被拒：approval/asked + decided(rejected) 配对后通知', async 
   h.emit('session/event', ROOT_AGENT.session, { type: 'approval/decided', data: { id: 'ap-1', outcome: 'rejected' } })
   h.advance(500)
   assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '🚫 操作被自动拒绝')
+  assert.equal(h.sent[0].title, '🚫 DSH 操作被自动拒绝')
   assert.match(h.sent[0].message, /bash-危险命令/)
 })
 
@@ -809,7 +809,7 @@ test('subagent/end：按主会话回溯工作区与标题', async () => {
   h.emit('subagent/end', { runId: 'run-1', provider: 'inproc', id: 'child-1', local: false, stopReason: 'completed' })
   h.advance(500)
   assert.equal(h.sent.length, 1)
-  assert.equal(h.sent[0].title, '🤖 后台子代理结束')
+  assert.equal(h.sent[0].title, '🤖 DSH 后台子代理结束')
   assert.equal(h.sent[0].message, 'proj/会话一:子代理已完成')
 })
 
@@ -820,7 +820,7 @@ test('goal/changed：complete 与 block（blockedReason.message）', async () =>
     change: { operation: 'complete', ref: { id: 'g1', revision: 2 }, goal: { objective: '把插件升到 0.1.7' } },
   })
   h.advance(500)
-  assert.equal(h.sent[0].title, '🎯 目标已完成')
+  assert.equal(h.sent[0].title, '🎯 DSH 目标已完成')
   assert.match(h.sent[0].message, /把插件升到 0\.1\.7-已完成/)
 
   h.emit('goal/changed', {
@@ -832,7 +832,7 @@ test('goal/changed：complete 与 block（blockedReason.message）', async () =>
     },
   })
   h.advance(500)
-  assert.equal(h.sent[1].title, '🎯 目标已阻塞')
+  assert.equal(h.sent[1].title, '🎯 DSH 目标已阻塞')
   assert.match(h.sent[1].message, /缺少 CI 令牌/)
 })
 
@@ -874,7 +874,7 @@ test('jobs：0.1.7 的 events.subscribe(settled) 触发后台任务通知，awai
   listeners[0].listener({ type: 'settled', awaited: false, cause: 'producer', job: { id: 'j4', label: '部署', status: 'failed', owner: 's1' } })
   h.advance(1000)
   assert.equal(h.sent.length, 4)
-  assert.equal(h.sent[0].title, '🧰 后台任务结束')
+  assert.equal(h.sent[0].title, '🧰 DSH 后台任务结束')
   assert.match(h.sent[0].message, /构建已完成/)
   assert.match(h.sent[1].message, /构建已完成/)
   assert.match(h.sent[2].message, /测试被终止/)
@@ -1020,12 +1020,17 @@ test('启动播报：全部加载成功时推一次"插件启动成功:共有 N 
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
   await settleStartup()
-  await new Promise((resolve) => setTimeout(resolve, 120))
+  // 等队列把启动播报真正送出去：页面刚上线时它还排在"等页面"的那一轮里（约 300ms）
+  for (let i = 0; i < 20; i += 1) {
+    const probe = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
+    if ((probe.recentSent || []).some((r) => /DSH 插件挂载成功/.test(String(r.title)))) break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
   const st = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/status?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
   assert.equal(st.lastRoute && st.lastRoute.mode, 'web', '有页面且权限可用 → 启动播报走浏览器通知')
-  const sent = (st.recentSent || []).find((r) => /DSH 启动完成/.test(String(r.title)))
+  const sent = (st.recentSent || []).find((r) => /DSH 插件挂载成功/.test(String(r.title)))
   assert.ok(sent, '启动播报必须发出')
-  assert.equal(sent.message, '插件启动成功:共有 3 个插件成功加载')
+  assert.match(String(sent.message), /^共有 3 个插件被成功加载，dsh-desktop-notify 运行模式：正常$/)
   assert.equal(sent.wire, 'page:settings-plugins', '启动通知点击 → 设置/内置插件')
 })
 
@@ -1052,6 +1057,43 @@ test('没有 loader 服务（非 profile 组合）时不播报、不报错', asy
   const h = await start()
   await settleStartup()
   assert.deepEqual(h.sent, [])
+})
+
+test('权限迁移：掉到不可用立刻提醒降级；修好后再次被阻止要再提醒（不是每进程一次）', async () => {
+  const h = await start({ roots: [ROOT_AGENT], config: { claimWaitMs: 60 } })
+  await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  const focus = (permission) => h.request({
+    method: 'POST', url: '/dnotify/page-focus',
+    body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission },
+  })
+  const report = (state) => h.request({
+    method: 'POST', url: '/dnotify/sw/report',
+    body: { from: 'page', kind: 'permission', state, pageId: 'p1' },
+  })
+  const degradedCount = () => h.sent.filter((x) => /DSH 权限变更/.test(String(x.title))).length
+
+  await focus('granted')
+  h.advance(600)
+  assert.equal(degradedCount(), 0, '只报告过 granted 时不该先报变更')
+
+  // ① 用户在站点设置里把通知改成"阻止" → 立刻提醒一次
+  await report('denied')
+  h.advance(600)
+  assert.equal(degradedCount(), 1, '掉到不可用要立刻用原生 Toast 告知')
+  const first = h.sent.filter((x) => /DSH 权限变更/.test(String(x.title)))[0]
+  assert.equal(first.click.wire, 'none', '这条提醒没有跳转目标（点了只消失）')
+
+  // ② 重复回报同一状态不重复打扰
+  await report('denied')
+  h.advance(600)
+  assert.equal(degradedCount(), 1, '状态没变就不该重复提醒')
+
+  // ③ 用户又改回"允许"，再不小心阻止一次 → 必须**再次**提醒（这是"每进程一次"会漏掉的情况）
+  await focus('granted')
+  h.advance(600)
+  await report('denied')
+  h.advance(600)
+  assert.equal(degradedCount(), 2, '回到 granted 后再次被阻止要重新提醒')
 })
 
 test('会话类通知自动带上"跳转到该会话"的点击链接', async () => {

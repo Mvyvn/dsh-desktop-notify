@@ -345,8 +345,51 @@ export function apply(ctx, config) {
     pendingStartup = null
     try { flush() } catch (e) { /* ignore */ }
   }
+  /**
+   * 已知的通知权限（null = 还没收到过任何页面上报）。判定用**状态迁移**，不用"一次性开关"：
+   *   任何真实迁移都提醒一次（granted → 非 granted 降级；非 granted → granted 恢复正常），
+   *   文案里带上新的运行模式；重复回报同一状态不打扰。
+   *   **不能**做成"每进程只说一次"：同进程里用户可能改回去又被阻止，必须能再次提醒。
+   * 重复回报同一状态不重复提醒；1.5 秒去重窗口另外兜一层。
+   *
+   * 不传会话归属 → 不受聚焦门控静默：这是"你的通知渠道变了"，必须让用户看到。
+   */
+  let lastKnownPermission: string | null = null
+  let permissionSeq = 0
+  function notePermission(state: string, pageId?: string): void {
+    if (!state) return
+    const prev = lastKnownPermission
+    lastKnownPermission = state
+    // 首次得知只记基线（"当前是 granted"不是一次变更，不该弹）；之后任何真实迁移都报
+    if (prev === null || prev === state) return
+    const modeText = state === 'granted' ? '正常' : '降级'
+    const message = 'dsh-desktop-notify 跟踪到消息提醒权限变更为:' + state
+      + '，插件运行模式同步变更为' + modeText
+    // 去重键带迁移序号：去重窗口是为了吞掉"同一事件被重复派发"，不该吞掉真实的第二次迁移
+    permissionSeq += 1
+    notify('⚠️ DSH 权限变更', message, 'low', undefined,
+      { dedupeKey: 'degraded-notify:' + state + ':' + permissionSeq, preferPageId: state === 'granted' ? String(pageId || '') : '' })
+  }
   /** 页面自报的通知权限（有界）：来自 /dnotify/sw/report 与每次 page-focus 上报。 */
   const pageNotify = createBoundedMap<string, { permission: string; at: number }>(64)
+  /**
+   * 当前"权威"通知权限：取**最新一次上报**。
+   *
+   * 两个 DSH 标签页同时开着时，慢一步的那个可能还停在旧值（它只在聚焦/权限变化时上报）。
+   * 权限本身是 per-origin 的，所以最新那条就是真相 —— 用它判定"权限变更"，
+   * 避免两个标签页的你一句我一句把运行模式来回抖成"变更→又变更"。
+   */
+  function freshestPermission(): string {
+    let best = ''
+    let bestAt = -1
+    for (const [, meta] of openStreams) {
+      const id = String((meta && meta.pageId) || '')
+      if (!id) continue
+      const rec = pageNotify.get(id)
+      if (rec && rec.at > bestAt) { bestAt = rec.at; best = rec.permission }
+    }
+    return best
+  }
   /**
    * 挑一个"能用来发浏览器通知"的页面。
    *
@@ -394,7 +437,16 @@ export function apply(ctx, config) {
       if (click.wire === 'none') log(`[dsh-desktop-notify] 这条通知不可点击（无 click 目标）: ${item.title}`)
 
       // ---- 混合 backend 的分流（唯一判定点）----
-      const pick = pickNotifyPage()
+      // 权限刚恢复成 granted 时这条"权限变更"必须走浏览器通知，但 pickNotifyPage() 可能先挑到
+      // 另一个还停在旧状态的标签页（它按聚焦/最后聚焦排序）。所以入队时可带 preferPageId：
+      // 那个页面在线且状态是 granted 就直接用它 —— 消除"恢复瞬间偶尔还降级一次"的竞态。
+      let pick = pickNotifyPage()
+      const hint = String(item.preferPageId || '')
+      if (hint && !(pick && pick.permission === 'granted' && pick.pageId === hint)) {
+        const rec = pageNotify.get(hint)
+        const online = [...openStreams].some(([, m]) => String((m && m.pageId) || '') === hint)
+        if (online && rec && rec.permission === 'granted') pick = { pageId: hint, permission: 'granted' }
+      }
       const web = !!(pick && pick.permission === 'granted')
       if (web) {
         const id = 'n-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
@@ -430,7 +482,7 @@ export function apply(ctx, config) {
       sink({
         title: item.title,
         message: degraded
-          ? String(item.message || '') + ' · 降级模式：浏览器通知不可用，点击将新开标签页'
+          ? String(item.message || '')
           : (item.message || ''),
         urgency: item.urgency,
         click,
@@ -511,7 +563,7 @@ export function apply(ctx, config) {
       return { queued: false, silenced: false, reason: 'duplicate' }
     }
     const click = options.click && typeof options.click === 'object' ? options.click : clickNone()
-    const queued = enqueue({ title, message, urgency, click })
+    const queued = enqueue({ title, message, urgency, click, preferPageId: options.preferPageId })
     pushRing(notifyLog, { at: Date.now(), title: String(title || ''), sessionIds: sessionIds.slice(0, 4), silenced: false, reason: queued ? 'queued' : 'dropped' })
     return { queued, silenced: false, reason: queued ? '' : 'dropped' }
   }
@@ -616,14 +668,21 @@ export function apply(ctx, config) {
         return
       }
       const failed = [...new Set(status.failed)]
+      // 文案（用户指定）：成功 →「共有 N 个插件被成功加载」；异常 →「存在 N 个插件运行异常：<ids>」
       const body = failed.length === 0
-        ? `插件启动成功:共有 ${status.loaded} 个插件成功加载`
-        : `有 ${failed.length} 个插件启动失败:加载失败的插件为 ${failed.join('、')}`
+        ? `共有 ${status.loaded} 个插件被成功加载`
+        : `存在 ${failed.length} 个插件运行异常：${failed.join('、')}`
       log(`[dsh-desktop-notify] startup report: loaded=${status.loaded} failed=${failed.join(',') || '-'}`)
-      // 等页面在线再发：否则启动瞬间没有页面连上来，必然走降级（原生 Toast）
-      sendWhenPageOnline(() => notify(failed.length === 0 ? '🚀 DSH 启动完成' : '⚠️ DSH 启动有插件未加载',
-        body, failed.length === 0 ? 'low' : 'normal', undefined,
-        { dedupeKey: 'startup', click: clickPage('settings-plugins') }))
+      // 等页面在线再发：否则启动瞬间没有页面连上来，必然走降级（原生 Toast）。
+      // 运行模式在**发送那一刻**判定（有在线页面且权限已是 granted → 正常，否则降级），
+      // 并且**只有这条启动播报**附带模式说明（其它通知正文不再挂降级后缀）。
+      sendWhenPageOnline(() => {
+        const startupPage = pickNotifyPage()
+        const mode = startupPage && startupPage.permission === 'granted' ? '正常' : '降级'
+        notify(failed.length === 0 ? '🚀 DSH 插件挂载成功' : '⚠️ DSH 插件挂载异常',
+          body + '，dsh-desktop-notify 运行模式：' + mode, failed.length === 0 ? 'low' : 'normal', undefined,
+          { dedupeKey: 'startup', click: clickPage('settings-plugins') })
+      })
     })()
   }
 
@@ -1087,7 +1146,11 @@ export function apply(ctx, config) {
       // 顺便记下"这个页面的通知权限"：分流要靠它决定走浏览器通知还是降级到原生 Toast
       const rid = lastSwReport.pageId ? String(lastSwReport.pageId) : ''
       const perm = lastSwReport.permission !== undefined ? String(lastSwReport.permission) : (lastSwReport.state !== undefined ? String(lastSwReport.state) : '')
-      if (rid && perm) pageNotify.set(rid, { permission: perm, at: Date.now() })
+      if (rid && perm) {
+        pageNotify.set(rid, { permission: perm, at: Date.now() })
+        // 用派生值判定（不是这条上报本身）：多标签页时以最新一次上报为准，避免抖动误报
+        notePermission(freshestPermission(), rid)
+      }
       maybeFlushStartup()
       log(`[dsh-desktop-notify] SW: ${JSON.stringify(lastSwReport)}`)
       json(res, 200, { ok: true })
@@ -1170,6 +1233,7 @@ export function apply(ctx, config) {
       // 分流要靠它决定走浏览器通知还是降级到原生 Toast。
       if (typeof body.permission === 'string' && body.permission) {
         pageNotify.set(pageId, { permission: String(body.permission), at: Date.now() })
+        notePermission(freshestPermission(), pageId)
         maybeFlushStartup()
       }
       // 注册表：seq 更新才生效（乱序保护；旧客户端不带 seq 时跳过该保护）；
@@ -1271,7 +1335,7 @@ export function apply(ctx, config) {
             const owner = task.ownerId ? String(task.ownerId) : ''
             const root = rootSessionIdOf(owner || session)
             const rootTitle = sessionTitleText(root || session)
-            notify(status === 'completed' ? '✅ 团队任务已完成' : '🕒 团队任务待处理',
+            notify(status === 'completed' ? '✅ DSH 团队任务已完成' : '🕒 DSH 团队任务待处理',
               withPrefix(rootTitle, root || session, subject),
               status === 'completed' ? 'low' : 'normal',
               [root, owner, session].filter((v) => !!v),
@@ -1288,7 +1352,7 @@ export function apply(ctx, config) {
         const root = rootSessionIdOf(session)
         // 静默范围只认**这个会话本身**：哪怕你正看着它的母会话或子代理，这条也要推。
         // 点击目标仍指母会话（可用性），与静默判定分开。
-        notify('🗜️ 上下文已智能压缩', withPrefix(sessionTitleText(root || session), root || session, '上下文已智能压缩'),
+        notify('🗜️ DSH 上下文已智能压缩', withPrefix(sessionTitleText(root || session), root || session, '上下文已智能压缩'),
           'low', [session], { dedupeKey: 'compact:' + String(data.compactionId || ''), click: clickForSession(root || session) })
         return
       }
@@ -1301,7 +1365,7 @@ export function apply(ctx, config) {
         const schedule = data.schedule || {}
         const root = rootSessionIdOf(session)
         const what = truncateText(String(schedule.title || schedule.prompt || schedule.id || '定时任务').replace(/\s+/g, ' ').trim(), 160)
-        notify('⏰ 定时任务已启动', withPrefix(sessionTitleText(root || session), root || session, what),
+        notify('⏰ DSH 定时任务已启动', withPrefix(sessionTitleText(root || session), root || session, what),
           'low', [root || session], { dedupeKey: 'schedule:' + String(schedule.id || data.id || what), click: clickForSession(root || session) })
         return
       }
@@ -1339,7 +1403,7 @@ export function apply(ctx, config) {
           // 静默范围 = **被拒的那个会话本身**（子代理里被拒时，你看着母会话也要推）；
           // 点击目标才归一到母会话（子会话 id 客户端目录里没有 → 点了不跳）。
           const deniedRoot = rootSessionIdOf(session) || session
-          notify('🚫 操作被自动拒绝',
+          notify('🚫 DSH 操作被自动拒绝',
             withPrefix(sessionTitleText(deniedRoot), deniedRoot, ((info as any).tool || '工具') + '-' + ((info as any).reason || '操作被自动拒绝')),
             'normal', [session], { dedupeKey: 'approval:' + id, click: clickForSession(deniedRoot) })
         }
@@ -1424,7 +1488,7 @@ export function apply(ctx, config) {
       // 会话归属 = 主会话 + 子会话本身：你正在看其中任一个，这条就不必打扰。
       // 点击跳转指向**母会话**：子代理（尤其是多层）的会话 id 客户端目录里未必解析得到，
       // 而"回到母会话"是用户真正要的落点（子代理自身的会话名在正文里已经写明）。
-      notify('🤖 后台子代理结束',
+      notify('🤖 DSH 后台子代理结束',
         withPrefix(mainTitle, main || subId, (sessionTitleText(subId) || subId || '后台子代理') + '已完成'),
         'low', [main, subId], {
           dedupeKey: 'subagent:' + (info.runId || subId),
@@ -1448,11 +1512,11 @@ export function apply(ctx, config) {
       const ref = change.ref || {}
       const goalKey = 'goal:' + String(ref.id || '') + ':' + String(ref.revision === undefined ? '' : ref.revision)
       if (change.operation === 'complete') {
-        notify('🎯 目标已完成', withPrefix(t, goalSession, objective + '-已完成'), 'normal', goalSession, { dedupeKey: goalKey, click: clickForSession(goalSession) })
+        notify('🎯 DSH 目标已完成', withPrefix(t, goalSession, objective + '-已完成'), 'normal', goalSession, { dedupeKey: goalKey, click: clickForSession(goalSession) })
       } else if (change.operation === 'block') {
         // blockedReason 是 { code, message } 对象（不是字符串）
         const br = goal.blockedReason
-        notify('🎯 目标已阻塞',
+        notify('🎯 DSH 目标已阻塞',
           withPrefix(t, goalSession, objective + (br && br.message ? '-' + truncateText(br.message, 160) : '')),
           'normal', goalSession, { dedupeKey: goalKey, click: clickForSession(goalSession) })
       }
@@ -1503,7 +1567,7 @@ export function apply(ctx, config) {
         const what = truncateText(String(entry.title || entry.prompt || id).replace(/\s+/g, ' ').trim(), 160)
         pushRing(scheduleLog, { at: Date.now(), event: 'delivered', id })
         // 静默范围 = 这个定时任务所属会话本身；点击目标才归一到母会话（可用性）
-        notify('⏰ 定时任务已启动', withPrefix(sessionTitleText(root), root, what),
+        notify('⏰ DSH 定时任务已启动', withPrefix(sessionTitleText(root), root, what),
           'low', [session], { dedupeKey: 'schedule:' + id + ':' + delivery, click: clickForSession(root) })
       }
       known = seen
@@ -1569,7 +1633,7 @@ export function apply(ctx, config) {
         log(`[dsh-desktop-notify] job settled ${job.id} label=${job.label} status=${status} cause=${event.cause} owner=${jobSession || '-'} root=${jobRoot || '-'}`)
         // 去重键带 job.id：同名任务在同一窗口内结算也要各自弹（不再靠 kind 合并）
         const dedupeKey = 'job:' + String(job.id || '')
-        notify('🧰 后台任务结束',
+        notify('🧰 DSH 后台任务结束',
           withPrefix(mainTitle, jobRoot || jobSession, label + suffix),
           status === 'failed' ? 'normal' : 'low',
           [jobRoot, jobSession].filter((v) => !!v), // 取不到会话归属时 notify 不静默（照常推送）

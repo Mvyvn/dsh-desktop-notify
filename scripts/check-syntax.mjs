@@ -4,9 +4,9 @@
 // 那样每加一个模块都要记得补一条，漏了就没人检查（而且顺序固定、失败点难读）。
 // 这里自动枚举 lib/*.js，新增文件自动纳入。
 //
-// 为什么还要查 BOM：scripts/install.ps1 里全是中文提示，而 Windows PowerShell 5.1
-// 读无 BOM 的 UTF-8 文件会按 ANSI 解码——中文变乱码后**字符串都会解析失败**，
-// 安装脚本直接语法报错退出（实测踩过：文件头少了 EF BB BF）。
+// 为什么还要查 BOM：仓里若再出现 .ps1（历史上是安装脚本，现已随"安装走 DSH 插件管理"
+// 一并删除），Windows PowerShell 5.1 读**无 BOM** 的 UTF-8 文件会按 ANSI 解码——中文变乱码后
+// 字符串直接解析失败（实测踩过：文件头少了 EF BB BF）。规则留着，防以后重新踩坑。
 //
 // 用法：npm run check
 import { readdirSync, readFileSync } from 'node:fs'
