@@ -23,7 +23,7 @@
 // DOM 监听器会被传入 Event 对象，而 !!Event === true，会把 blur/visibilitychange
 // 变成恒上报 focused=true（此前正是这个 Bug 导致失焦上报永远不生效）。
 (window as any).__ModuleLoader__.load({
-  id: 'dsh-desktop-notify',
+  id: '@mvyvn/dsh-desktop-notify',
   factory: function (require) {
     var module = { exports: {} }
     var exports = module.exports
@@ -192,7 +192,7 @@
     function openPluginsPanel(): boolean {
       var nav = clientService('pluginNavigation')
       if (nav && typeof nav.openBundle === 'function') {
-        try { nav.openBundle('dsh-desktop-notify'); blurActive(); return true } catch (e) { /* 试下一个 */ }
+        try { nav.openBundle('@mvyvn/dsh-desktop-notify'); blurActive(); return true } catch (e) { /* 试下一个 */ }
       }
       var layout = clientService('layout')
       if (layout && typeof layout.selectPanel === 'function') {
@@ -933,7 +933,7 @@
     }
 
     var SETTINGS_NS = 'desktop-notify'
-    var SETTINGS_PKG = 'dsh-desktop-notify'
+    var SETTINGS_PKG = '@mvyvn/dsh-desktop-notify'
     /** 这两类通知**没有会话归属**（启动播报讲插件状态、权限变更讲浏览器权限），
      *  给它们"看着该会话时静默"是逻辑错误 —— 界面上直接显示"始终推送"。 */
     var NO_SESSION_KINDS = ['startup', 'permission']
@@ -1347,7 +1347,7 @@
       } catch (e) { /* 没有 slot 服务（旧 DSH / 非 Web）就跳过设置页 */ }
     }
 
-    ;(exports as any).name = 'dsh-desktop-notify'
+    ;(exports as any).name = '@mvyvn/dsh-desktop-notify'
     // slots/configForms/locale 是设置页要用的客户端服务；缺它们时 apply 仍会被调用，
     // installSettingsPage 里再做一次能力检查（旧 DSH 上只是没有设置页）。
     ;(exports as any).inject = ['slots', 'configForms']

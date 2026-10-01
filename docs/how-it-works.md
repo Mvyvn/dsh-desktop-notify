@@ -105,7 +105,7 @@
 8. 客户端执行目标：
    - `session:<id>` → `ctx.get('uiWorkspace').openSession(id)`（与点侧栏会话行同一条链路）；服务未就绪就重试；会话不在客户端目录里（同步抛错）则只记一行日志放弃。子代理会话由 ui-workspace 自己的规则解析成**子代理界面**；子代理/后台任务通知的目标是它的**主会话**。
    - `page:settings-plugins` → 先点侧边栏**真实设置入口**（可访问名「设置」；桌面端走「账号菜单 → 设置」），再在设置对话框（`role="dialog"` + 可访问名「设置」）里按**可访问名**点「内置插件」导航格并验证已就位（`aria-current`）；打不开就重试（深链场景下界面可能几秒后才挂载，最多 10 秒）。**不会**退到侧栏「插件」页——落点错了就是错。
-   - `page:plugins` → `ctx.get('pluginNavigation').openBundle('dsh-desktop-notify')`（退路 `layout.selectPanel('plugins')`）。
+   - `page:plugins` → `ctx.get('pluginNavigation').openBundle('@mvyvn/dsh-desktop-notify')`（退路 `layout.selectPanel('plugins')`）。
 
 > 跳转结果会回报给宿主（`/dnotify/navigated`）：认领成功 ≠ 跳转成功，`not-found` 表示目标会话已不在客户端目录里，这是"点了却没跳"唯一的诊断痕迹。
 

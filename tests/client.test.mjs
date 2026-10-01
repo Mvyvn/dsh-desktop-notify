@@ -402,7 +402,7 @@ test('跳转 page:plugins → 插件面板（pluginNavigation）', async () => {
   await tick()
   page.state.eventSource.emit('navigate', JSON.stringify({ id: 'op-1', target: 'ignored-by-client' }))
   await tick()
-  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+  assert.deepEqual(page.opened, ['panel:@mvyvn/dsh-desktop-notify'])
 })
 
 test('跳转结果回报：会话不在目录里时 POST /navigated（认领成功≠跳转成功）', async () => {
@@ -562,6 +562,6 @@ test('旧式 hash 深链仍可用（#dsh-notify=…，处理完清掉 hash）', 
   })
   page.exports.apply(page.ctx)
   await tick()
-  assert.deepEqual(page.opened, ['panel:dsh-desktop-notify'])
+  assert.deepEqual(page.opened, ['panel:@mvyvn/dsh-desktop-notify'])
   assert.equal(page.hash, '', '处理完必须清掉 hash，避免刷新重复触发')
 })
