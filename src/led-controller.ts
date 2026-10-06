@@ -57,6 +57,14 @@ export interface LedControllerOptions {
   readonly now?: () => number
   /** 采样周期（毫秒）。500ms 足够跟手，也不会给宿主添负担。 */
   readonly tickMs?: number
+  /**
+   * 允许驱动串口的判定（热重载用）。
+   * 这个插件在 HMR 后可能同时存在新旧两个实例，而**串口是独占资源**：
+   * 两个实例各开一次 → 后开的那个必然失败并进入重连循环，日志里全是噪声。
+   * 所以跟路由/通知一样，只有"接管成功的最新实例"才允许驱动；其余实例的控制器
+   * 每次采样直接关掉链路并返回。缺省 = 总是允许（单实例 / 测试）。
+   */
+  readonly mayRun?: () => boolean
 }
 
 export interface LedStatus {
@@ -312,6 +320,12 @@ export function createLedController(options: LedControllerOptions): LedControlle
       return
     }
     disabledLogged = false
+
+    // 热重载期间可能存在多个实例：只有接管成功的那一个才允许碰串口（独占资源）
+    if (options.mayRun && !options.mayRun()) {
+      link.close()
+      return
+    }
 
     const agents = ctx.get('agents')
     if (!agents || typeof agents.list !== 'function') {
