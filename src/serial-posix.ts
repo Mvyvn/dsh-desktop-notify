@@ -44,7 +44,7 @@ export function openPosixSerial(path: string, baud: number): PosixSerialHandle {
     const fallback = spawnSync('stty', ['-f', path, 'raw', String(baud), 'cs8', '-parenb', '-cstopb'], { timeout: 3000 })
     if (fallback.error || fallback.status !== 0) {
       try { closeSync(fd) } catch (e) { /* ignore */ }
-      throw new Error(`stty 无法配置 ${path}（${baud} 8N1）：${(stty.stderr || '').toString().trim() || 'stty 不可用'}`)
+      throw new Error(`无法配置 ${path}`)
     }
   }
   let closed = false
