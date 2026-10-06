@@ -21,6 +21,7 @@ import { clickNone, clickUrl, type ClickTarget, type PageTarget } from './protoc
 import { sessionIdList, type FocusGate } from './gate.js'
 import { truncateText } from './text.js'
 import type { NotificationItem, Urgency } from './notify.js'
+import type { LedApi } from './led-api.js'
 
 const URGENCIES: readonly string[] = ['low', 'normal', 'critical']
 const MAX_TITLE = 160
@@ -36,8 +37,13 @@ const PAGE_TARGETS: readonly string[] = ['settings-plugins', 'plugins']
  *      但会在结果里回带 `unsupportedVersion: true`，调用方可据此降级；
  *   3. 结果对象的字段**只增不改**：现有 push/pushAlways/notify 的返回语义保持不变；
  *   4. `capabilities` 让调用方探测能力，而不是靠版本号猜。新增能力只往数组里加。
+ *
+ * ⚠️ 本分支（feat/led-serial-ticker）把版本提到 `1.1.0-led.1`：**主版本仍是 1**，
+ * 因此老调用方的 `unsupportedVersion` 判定不受影响；`-led.1` 后缀只用来标明
+ * "这份构建带着一条不并入主线的串口灯带协议"。串口协议自己另有一个特殊版本号
+ * （见 led-api.ts 的 LED_API_VERSION）。
  */
-export const NOTIFY_API_VERSION = '1.0.0'
+export const NOTIFY_API_VERSION = '1.1.0-led.1'
 
 /** 本版本提供的能力清单（只增不减）。 */
 export const NOTIFY_API_CAPABILITIES: readonly string[] = [
@@ -50,6 +56,16 @@ export const NOTIFY_API_CAPABILITIES: readonly string[] = [
   'click.legacy-url',  // 兼容旧字段 url: 'https://…'
   'web-notification',  // 浏览器通知渠道（含 shown 回执与原生兜底）
   'dialog.four-state', // 诊断端点 /dnotify/status
+  // ---- 本分支新增：USB 串口 LED 状态灯 ----
+  'led.serial',        // 串口通道（`desktopNotify.led`）
+  'led.scene',         // 语义状态：running/waiting/done/error（绿/黄/白/红）
+  'led.effect',        // 显式效果（流动/呼吸/闪烁/彩虹…）
+  'led.overlay',       // 带 TTL 的瞬态覆盖层（固件自己到期回落）
+  'led.brightness',    // 亮度
+  'led.progress',      // 进度条
+  'led.frame',         // 白名单原始帧
+  'led.ack',           // 解除"自上次聚焦未回来"的提醒闩
+  'led.status',        // 链路与判定状态
 ]
 
 /** 归一后的通知载荷。 */
@@ -75,13 +91,18 @@ export interface NotifyOutcome {
 }
 
 export interface NotifyApi {
-  /** 本插件实现的协议版本（基线 1.0.0）。 */
+  /** 本插件实现的协议版本（本分支：1.1.0-led.1）。 */
   readonly apiVersion: string
   /** 能力清单，供调用方探测。 */
   readonly capabilities: readonly string[]
   push(item: unknown): boolean
   pushAlways(item: unknown): boolean
   notify(item: unknown): NotifyOutcome
+  /**
+   * 串口 LED 控制面（本分支专属）。灯带功能未启用/平台不支持时为 null——
+   * 调用方**必须判空**，不要假设它一定在。
+   */
+  readonly led: LedApi | null
 }
 
 /** 宿主内部投递回调签名。 */
@@ -94,6 +115,8 @@ export interface NotifyDeps {
     options: { click: ClickTarget },
   ): { queued?: boolean; silenced?: boolean; reason?: string } | undefined
   enqueue(item: NotificationItem): boolean
+  /** LED 控制面（可缺省：没有灯带功能的构建里就是 undefined）。 */
+  led?: () => LedApi | null
 }
 
 /**
@@ -204,6 +227,10 @@ export function createNotifyApi(deps: NotifyDeps): NotifyApi {
     },
     notify(item: unknown): NotifyOutcome {
       return deliver(item)
+    },
+    get led(): LedApi | null {
+      // 每次读都现问：设置页刚打开灯带开关时，已持有 desktopNotify 的插件立刻就能用
+      try { return deps.led ? deps.led() : null } catch (e) { return null }
     },
   }
 }

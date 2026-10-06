@@ -55,6 +55,10 @@
     "src/state.ts",
     "src/icons.ts",
     "src/theme-codec.ts",
-    "src/toast-xml.ts"
+    "src/toast-xml.ts",
+    "src/led-protocol.ts",
+    "src/lifecycle.ts",
+    "src/led-judge.ts",
+    "src/serial-link.ts"
   ]
 }

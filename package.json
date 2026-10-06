@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-notify",
-  "version": "2.0.0",
+  "version": "2.1.0-led.1",
   "description": "使用系统推送 DSH 的提醒",
   "type": "module",
   "main": "lib/index.js",
@@ -25,6 +25,8 @@
     "check": "node scripts/check-syntax.mjs",
     "pretest": "npm run build",
     "test": "node scripts/run-tests.mjs",
+    "test:firmware": "node scripts/firmware-build.mjs",
+    "gen:vectors": "node scripts/gen-led-vectors.mjs",
     "prepack": "npm run build"
   },
   "dsh": {
