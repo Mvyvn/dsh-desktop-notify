@@ -900,6 +900,9 @@ export function apply(ctx, config) {
       log: (line) => log(line),
       lastFocusedAt: () => lastFocusedAt,
       pendingApprovals: (sessionId) => pendingApprovalCount(sessionId),
+      // 串口是独占资源：热重载后新旧实例并存时，只有"接管成功的最新实例"能驱动
+      // （与路由/通知的接管判定同一套：见 isNewest 的说明）
+      mayRun: () => isNewest(),
     })
   } else {
     log(`[led] 当前平台（${process.platform}）没有串口实现，LED 状态灯不可用`)
@@ -1306,11 +1309,27 @@ export function apply(ctx, config) {
       return
     }
 
-    // LED 诊断/控制端点：同样用进程令牌保护（和 /status 一个级别）。
-    // 板子还没打的时候，这里就是唯一的"看不到灯也能调试"的入口：
-    //   POST /dnotify/led?t=<令牌>  { "op": "status" | "ack" | "preview", ... }
+    // LED 诊断/控制端点。板子还没打的时候，这里是唯一"看不到灯也能调试"的入口。
+    //
+    // 两种调用者、两条准入路径（这点踩过：只认令牌会让设置页的灯带卡片永远 403）：
+    //   · **本机脚本 / curl**（模拟点击转发器那种角色）→ 带 `?t=<进程令牌>`，和 /status 一个级别；
+    //   · **DSH 页面里的设置页卡片** → 浏览器的 fetch 拿不到进程令牌，但它能过 DSH 自己的
+    //     信任栅栏 + 浏览器鉴权（和 /page-focus 同一个级别）。所以两条路径放行任一条即可。
     if (path === 'led' && (method === 'GET' || method === 'POST')) {
-      if ((url.searchParams.get('t') || '') !== CLICK_TOKEN) { res.writeHead(403); res.end('forbidden'); return }
+      if ((url.searchParams.get('t') || '') !== CLICK_TOKEN) {
+        try {
+          const admission = ctx.connection.admit(req)
+          if (admission && 'rejection' in admission) {
+            res.writeHead(admission.rejection)
+            res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
+            return
+          }
+        } catch (e) {
+          res.writeHead(403)
+          res.end('forbidden')
+          return
+        }
+      }
       if (ledController === null) { json(res, 200, { ok: false, reason: 'unsupported-platform', protocol: LED_API_VERSION }); return }
       const body = method === 'POST' ? ((await readJsonBody(req)) || {}) : {}
       const op = typeof body.op === 'string' ? body.op : 'status'

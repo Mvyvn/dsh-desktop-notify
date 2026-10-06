@@ -780,6 +780,47 @@ test('诊断端点 /dnotify/status：只有知道令牌的本机调用能看', a
   assert.ok(stream)
 })
 
+test('LED 端点 /dnotify/led：设置页（浏览器鉴权放行）不带令牌也能读状态', async () => {
+  // 这条是真实踩过的坑：端点原来只认进程令牌，而设置页的灯带卡片是浏览器 fetch，
+  // 拿不到令牌 → 永远 403 → 卡片永远显示"读不到"。现在两条准入路径任一即可。
+  const h = await start({ roots: [ROOT_AGENT] })
+  const res = await h.request({ method: 'GET', url: '/dnotify/led' })
+  assert.equal(res.status, 200)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.protocol, '1.0.0-led.1')
+  assert.equal(body.enabled, false, '默认关闭（多数人机器上没有这块板子）')
+  assert.equal(body.reason, 'disabled')
+  assert.ok(Array.isArray(body.verdicts), '应回带每个会话的判定')
+  assert.equal(typeof body.sceneText, 'string')
+  assert.ok(body.capabilities.includes('led.scene'))
+})
+
+test('LED 端点：浏览器鉴权被拒时照样 403；本机令牌仍然可用', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  h.services.desktopNotify.pushAlways({ title: '取令牌', click: { type: 'session', sessionId: 's1' } })
+  h.advance(500)
+  h.setAdmitRejection(403)
+  const denied = await h.request({ method: 'GET', url: '/dnotify/led' })
+  assert.equal(denied.status, 403)
+  h.setAdmitRejection(undefined)
+  const byToken = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/led?t=${globalThis.__dshDesktopNotifyClickToken}` })).body)
+  assert.equal(byToken.ok, true)
+})
+
+test('LED 端点：ack 解除提醒、preview 在未连灯带时如实回报失败', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const ack = JSON.parse((await h.request({ method: 'POST', url: '/dnotify/led', body: { op: 'ack' } })).body)
+  assert.equal(ack.ok, true)
+  assert.equal(ack.op, 'ack')
+  const preview = await h.request({ method: 'POST', url: '/dnotify/led', body: { op: 'preview', state: 'done' } })
+  assert.equal(preview.status, 400, '没启用灯带时不该假装成功')
+  assert.equal(JSON.parse(preview.body).reason, 'not-sent')
+  const unknown = await h.request({ method: 'POST', url: '/dnotify/led', body: { op: 'nope' } })
+  assert.equal(unknown.status, 400)
+  assert.equal(JSON.parse(unknown.body).reason, 'unknown-op')
+})
+
 test('SSE：流断开后不再推送，也不会因为心跳而报错', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
