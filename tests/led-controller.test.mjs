@@ -42,7 +42,9 @@ function harness(options = {}) {
     log: () => {},
     lastFocusedAt: options.lastFocusedAt || (() => T0),   // 默认"人就在看"，避免提醒闩干扰
     open: async (port, baud) => { opened.push({ port, baud }); return fakeHandle },
-    list: async () => [],
+    // 默认"本机有设备"（COM7）：多数用例测的是"有设备时"的行为；
+    // "没设备"的路径由专门用例传 list: async () => [] 覆盖
+    list: options.list || (async () => [{ path: 'COM7', label: '' }]),
     now: () => clock.now,
     ...(hasMayRun ? { mayRun: () => mayRun } : {}),
   })
@@ -54,6 +56,16 @@ function harness(options = {}) {
   }
   return {
     controller, clock, opened, written, lastScene,
+    /**
+     * 走够几次采样，让「端口枚举 → 打开串口 → 推帧」整条链落地。
+     * 首次采样只负责发起枚举（结论还没回来时不驱动），所以至少要 3 次。
+     */
+    async settle(times = 3) {
+      for (let i = 0; i < times; i += 1) {
+        controller.refresh()
+        await new Promise((r) => setImmediate(r))
+      }
+    },
     setConfig(patch) { cfg = Object.assign({}, cfg, patch) },
     setMayRun(value) { mayRun = value },
     handle: fakeHandle,
@@ -76,9 +88,7 @@ test('agent 在跑 → SCENE 是 running（白，流动）', async () => {
     get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
   }
   const h = harness({ agents })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   const frame = h.lastScene()
   assert.ok(frame, '应当写出 SCENE 帧')
   assert.equal(frame.payload[0], LED_STATE_CODE.running)
@@ -93,9 +103,7 @@ test('没有任何未结算工作 → done（人不在看时带提醒位）', as
     get: (id) => (id === 's1' ? rootAgent('s1') : undefined),
   }
   const h = harness({ agents, lastFocusedAt: () => 0 })   // 从未聚焦 = 人不在
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   const frame = h.lastScene()
   assert.equal(frame.payload[0], LED_STATE_CODE.done)
   assert.equal((frame.payload[1] & SCENE_FLAG.ATTENTION) !== 0, true, '人不在时应当一直提醒')
@@ -108,9 +116,7 @@ test('一轮结束但子代理还在跑 → 仍判 running（这是本功能的�
     get: (id) => (id === 's1' ? rootAgent('s1', 'idle') : undefined),
   }
   const h = harness({ agents })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.lastScene().payload[0], LED_STATE_CODE.running)
 })
 
@@ -127,9 +133,7 @@ test('后台任务未结算 → running', async () => {
     ]),
   }
   const h = harness({ agents, jobs })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.lastScene().payload[0], LED_STATE_CODE.running)
 })
 
@@ -142,9 +146,7 @@ test('inbox 里压着待处理输入（会被再次调起）→ running', async 
   const sessions = { get: (id) => (id === 's1' ? { id: 's1', header: {} } : undefined) }
   const projections = { stateOf: (session, key) => (key === 'inbox' ? { 'next-turn': [{}, {}], 'next-step': [] } : undefined) }
   const h = harness({ agents, sessions, projections })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.lastScene().payload[0], LED_STATE_CODE.running)
 })
 
@@ -159,9 +161,7 @@ test('有人等你回答（userQuestions 投影）→ waiting（黄）', async (
     stateOf: (session, key) => (key === 'userQuestions' ? { questions: { active: [{ state: 'open' }] } } : undefined),
   }
   const h = harness({ agents, sessions, projections })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.lastScene().payload[0], LED_STATE_CODE.waiting)
 })
 
@@ -176,15 +176,11 @@ test('目标 blocked → waiting；目标 active 但没人跑 → running', asyn
     return harness({ agents, goals })
   }
   const blocked = build('blocked')
-  blocked.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  blocked.controller.refresh()
+  await blocked.settle()
   assert.equal(blocked.lastScene().payload[0], LED_STATE_CODE.waiting)
 
   const active = build('active')
-  active.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  active.controller.refresh()
+  await active.settle()
   assert.equal(active.lastScene().payload[0], LED_STATE_CODE.running, 'active 目标会被 round-driver 再调起')
 })
 
@@ -195,16 +191,12 @@ test('未接管的实例（热重载中的旧实例）绝不碰串口', async ()
     get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
   }
   const h = harness({ agents, mayRun: false })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.opened.length, 0, '没接管就不该打开串口（串口是独占资源）')
   assert.equal(h.written.length, 0)
 
   h.setMayRun(true)
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.opened.length, 1, '接管之后才打开')
   assert.ok(h.lastScene())
 })
@@ -216,9 +208,7 @@ test('灯带未启用 → 不开串口、不写字节（默认就是关的）', 
     get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
   }
   const h = harness({ agents, config: { enabled: false } })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.opened.length, 0)
   assert.equal(h.written.length, 0)
   assert.equal(h.controller.status().reason, 'disabled')
@@ -226,9 +216,7 @@ test('灯带未启用 → 不开串口、不写字节（默认就是关的）', 
 
 test('缺少 agents 服务时不点灯（分不清在跑还是跑完，宁可不给错信号）', async () => {
   const h = harness({})
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.opened.length, 0)
   assert.equal(h.controller.status().reason, 'no-agents-service')
 })
@@ -241,8 +229,7 @@ test('noteError → 红灯（异常保鲜期内）', async () => {
   }
   const h = harness({ agents, lastFocusedAt: () => 0 })
   h.controller.noteError('s1', '后台任务失败')
-  await new Promise((r) => setImmediate(r))
-  h.controller.refresh()
+  await h.settle()
   assert.equal(h.lastScene().payload[0], LED_STATE_CODE.error)
 })
 
@@ -253,12 +240,38 @@ test('画面没变就不重复写（去重发生在链路层，这里确认端�
     get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
   }
   const h = harness({ agents })
-  h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
-  for (let i = 0; i < 5; i += 1) h.controller.refresh()
+  await h.settle()                     // 枚举 → 打开 → 首帧
+  for (let i = 0; i < 5; i += 1) h.controller.refresh()   // 画面没变：不该再写
   const parser = createFrameParser()
   const scenes = h.written.flatMap((buf) => parser.push(buf)).filter((f) => f.type === FRAME.SCENE)
   assert.equal(scenes.length, 1, `steady 状态下只该写 1 帧，实际 ${scenes.length}`)
+})
+
+test('没有串口设备：不驱动、不尝试打开，并如实回报 devicePresent=false', async () => {
+  const agents = {
+    roots: () => [rootAgent('s1', 'running')],
+    list: () => [rootAgent('s1', 'running')],
+    get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
+  }
+  const h = harness({ agents, list: async () => [] })
+  await h.settle()
+  assert.equal(h.controller.status().devicePresent, false, '枚举不到设备时必须如实回报')
+  assert.deepEqual(h.controller.status().ports, [])
+  assert.equal(h.opened.length, 0, '没设备就别去开串口（未连接时不驱动）')
+  assert.equal(h.written.length, 0)
+})
+
+test('有串口设备：devicePresent=true，照常打开并推帧', async () => {
+  const agents = {
+    roots: () => [rootAgent('s1', 'running')],
+    list: () => [rootAgent('s1', 'running')],
+    get: (id) => (id === 's1' ? rootAgent('s1', 'running') : undefined),
+  }
+  const h = harness({ agents })
+  await h.settle()
+  assert.equal(h.controller.status().devicePresent, true)
+  assert.deepEqual(h.controller.status().ports, ['COM7'])
+  assert.equal(h.opened.length, 1)
 })
 
 test('status() 回带每会话判定与链路信息（诊断端点就是它）', async () => {
@@ -269,8 +282,9 @@ test('status() 回带每会话判定与链路信息（诊断端点就是它）',
   }
   const h = harness({ agents })
   h.controller.refresh()
-  await new Promise((r) => setImmediate(r))
+  await new Promise((r) => setImmediate(r))   // 让首次端口枚举落地
   h.controller.refresh()
+  await new Promise((r) => setImmediate(r))   // 让 open（异步）落地
   const status = h.controller.status()
   assert.equal(status.enabled, true)
   assert.equal(status.verdicts.length, 1)

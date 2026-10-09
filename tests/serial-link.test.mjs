@@ -139,11 +139,29 @@ test('端口 auto：从枚举里挑（COM3+ 优先，COM1 让位）', async () =
   assert.equal(link.status().port, 'COM7')
 })
 
-test('端口 auto 且一个串口都没有 → error 且明确说明"没找到设备"', async () => {
+test('端口 auto 且一个串口都没有 → errorCode=no-device（"还没接线"，不是故障）', async () => {
   const { link } = makeLink('auto', { list: async () => [] })
   link.tick(); await flush()
   assert.equal(link.status().state, 'error')
   assert.match(link.status().lastError, /没有找到任何串口设备/)
+  // 关键：设置页据此说"未连接"而不是"异常" —— 没插灯不是故障
+  assert.equal(link.status().errorCode, 'no-device')
+  assert.ok(link.status().retryInMs > 0, '仍然按退避重试：插上就自动连')
+})
+
+test('打不开端口 → errorCode=open-failed；写失败 → write-failed（与"没插设备"分开）', async () => {
+  const { fake, link, clock } = makeLink('COM7')
+  fake.failOpen = '打不开串口 COM7'
+  link.tick(); await flush()
+  assert.equal(link.status().errorCode, 'open-failed')
+  fake.failOpen = ''
+  clock.now += RECONNECT_BACKOFF_MS[0]      // 退避到点才重试
+  link.tick(); await flush()
+  assert.equal(link.status().errorCode, '', '打开成功后清掉故障码')
+  link.apply(scene())                       // 有画面才谈得上写
+  fake.failWrite = true
+  link.tick()
+  assert.equal(link.status().errorCode, 'write-failed')
 })
 
 test('收包：HELLO_ACK 更新设备信息，EVENT 触发回调（板上按键=我知道了）', async () => {
