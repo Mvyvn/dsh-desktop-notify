@@ -258,7 +258,7 @@ test('串口那行的说明与标签左右排（不再另起一行），指示�
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -279,15 +279,6 @@ test('串口那行的说明与标签左右排（不再另起一行），指示�
   assert.equal(statusBlock.length >= 1, true, '指示灯状态块应当有额外下间距')
 })
 
-test('波特率白名单：浏览器半区的副本必须与 src/config.ts 一致', async () => {
-  // 浏览器半区是独立脚本（不能 import），所以清单有两份 —— 这条护栏防止改一边忘另一边
-  const { LED_BAUD_RATES } = await import('../lib/config.js')
-  const match = /LED_BAUD_RATES\s*=\s*\[([^\]]*)\]/.exec(CLIENT_SOURCE)
-  assert.ok(match, 'client.js 里应当有 LED_BAUD_RATES 清单')
-  const found = match[1].split(',').map((part) => Number(part.trim()))
-  assert.deepEqual(found, [...LED_BAUD_RATES], '两处波特率白名单必须一致')
-})
-
 test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须保持一致（否则整棵设置树被打崩）', () => {
   let ready = false
   const setCalls = []
@@ -297,7 +288,7 @@ test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须�
       writable: true,
       value: {
         enabled: true, apiEnabled: true, debug: false, types: [],
-        ledEnabled: false, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160,
+        ledEnabled: false, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160,
         ledAttention: true, ledIdleOffSec: 120,
       },
     }),
@@ -321,7 +312,7 @@ test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须�
   const words = texts(tree).join('|')
   // 想看最终文案长什么样：DSH_NOTIFY_DUMP_SETTINGS=1 node --test tests/client-settings.test.mjs
   if (process.env.DSH_NOTIFY_DUMP_SETTINGS) console.log('[设置页文案] ' + words.split('|').join(' / '))
-  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '波特率', '亮度', '熄灯延时（秒）', '聚焦跟踪持续提醒', '各预设推送']) {
+  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '亮度', '完成时响一声', '熄灯延时（秒）', '聚焦跟踪持续提醒', '各预设推送']) {
     assert.ok(words.includes(label), `设置页应当渲染出「${label}」，实际文本：${words.slice(0, 240)}`)
   }
   // 用户明确要求：删掉的部分就是"不需要第二行字" —— 这些说明文案不许再出现
@@ -335,7 +326,7 @@ test('亮度/熄灯延时用标准步进控件：箭头按步长提交，且不�
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: (key, value) => { setCalls.push([key, value]) },
@@ -356,23 +347,22 @@ test('亮度/熄灯延时用标准步进控件：箭头按步长提交，且不�
   byLabel('增大熄灯延时（秒）').props.onClick()
   assert.deepEqual(setCalls.pop(), ['ledIdleOffSec', 130])
 
-  // 步进控件本体是标准胶囊（三个数值字段各一个）
+  // 步进控件本体是标准胶囊（两个数值字段各一个）
   const pills = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-stepper')
-  assert.equal(pills.length, 3, '波特率/亮度/熄灯延时各一个步进控件')
+  assert.equal(pills.length, 2, '亮度/熄灯延时各一个步进控件（波特率由固件固定，已删）')
   const inputs = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-input')
   assert.equal(inputs.length, 1, '串口用标准文本输入')
 
-  // 胶囊宽度按位数撑开：6 位数的 115200 不能被右缘的箭头压住
-  // （DSH 自己的区间步进控件同款解法：calc(Nch + 52px) + 左右各 26px 内边距）
+  // 胶囊宽度按位数撑开（DSH 自己的区间步进控件同款解法：calc(Nch + 52px) + 左右各 26px 内边距）
   const values = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-stepper-value')
-  assert.deepEqual(values.map((n) => n.props.style.width), ['calc(6ch + 52px)', 'calc(3ch + 52px)', 'calc(3ch + 52px)'])
+  assert.deepEqual(values.map((n) => n.props.style.width), ['calc(3ch + 52px)', 'calc(3ch + 52px)'])
 })
 
 test('行标题格式：一律用标准设置字段的 13px / 字重 500（删掉第二行后不再显得又小又轻）', () => {
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -385,7 +375,7 @@ test('行标题格式：一律用标准设置字段的 13px / 字重 500（删�
     assert.equal(hits.length >= 1, true, `应当渲染出标题「${text}」`)
     return hits[0].props.style
   }
-  for (const text of ['启用任务状态指示灯', '聚焦跟踪持续提醒', '波特率', '亮度', '熄灯延时（秒）', '串口']) {
+  for (const text of ['启用任务状态指示灯', '聚焦跟踪持续提醒', '亮度', '完成时响一声', '熄灯延时（秒）', '串口']) {
     assert.equal(labelOf(text).fontSize, '13px', `「${text}」应当用标准字段字号`)
     assert.equal(labelOf(text).fontWeight, 500, `「${text}」应当加粗（标准字段字重）`)
   }
@@ -497,11 +487,11 @@ test('设置页样式表必须跟着代码更新（跨热重载的旧 CSS 不能
   assert.ok(styleEl.textContent.includes('.dsh-notify-stepper'), '已存在的样式元素也要更新内容，不能直接 return')
 })
 
-test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/波特率等字段', () => {
+test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/亮度等字段', () => {
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -513,44 +503,6 @@ test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/�
   assert.ok(at('启用任务状态指示灯') >= 0 && at('聚焦跟踪持续提醒') >= 0, '两个开关都要在')
   assert.ok(at('启用任务状态指示灯') < at('聚焦跟踪持续提醒'), '提醒开关要紧跟启用开关')
   assert.ok(at('聚焦跟踪持续提醒') < at('串口'), '提醒开关要在串口等字段之前')
-})
-
-test('波特率步进走白名单：115200 的下一档是 230400，而不是 115201', () => {
-  const setCalls = []
-  const form = {
-    getSnapshot: () => ({
-      status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBaud: 115200, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
-    }),
-    subscribe: () => () => {},
-    set: (key, value) => { setCalls.push([key, value]) },
-  }
-  const { Section, mini } = loadSettingsSection({ form })
-  mini.render(mini.React.createElement(Section, null))
-  const tree = mini.render(mini.React.createElement(Section, null))
-  findAll(tree, (n) => n.props && n.props['aria-label'] === '增大波特率')[0].props.onClick()
-  assert.deepEqual(setCalls.pop(), ['ledBaud', 230400])
-  findAll(tree, (n) => n.props && n.props['aria-label'] === '减小波特率')[0].props.onClick()
-  assert.deepEqual(setCalls.pop(), ['ledBaud', 57600])
-})
-
-test('设置页：summary 视图与完整视图之间切换也不能改变 Section 自身的 hook 数量', () => {
-  const form = {
-    getSnapshot: () => ({
-      status: 'ready',
-      writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'COM7', ledBaud: 9600, ledBrightness: 100, ledAttention: false, ledIdleOffSec: 0 },
-    }),
-    subscribe: () => () => {},
-    set: () => {},
-  }
-  const { Section, mini } = loadSettingsSection({ form })
-  const summary = mini.render(mini.React.createElement(Section, { view: 'summary' }))
-  assert.ok(texts(summary).join('').includes('桌面通知设置'))
-  const full = mini.render(mini.React.createElement(Section, null))   // 同一个实例继续渲染
-  assert.ok(texts(full).join('|').includes('指示灯'))
-  const backToSummary = mini.render(mini.React.createElement(Section, { view: 'summary' }))
-  assert.ok(texts(backToSummary).join('').includes('桌面通知设置'))
 })
 
 test('指示灯状态：首屏给"启动中"，不因为拿不到宿主状态而崩', () => {

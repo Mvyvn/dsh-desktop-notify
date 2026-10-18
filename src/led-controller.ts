@@ -20,16 +20,18 @@ import {
   createWorkLedger, aggregateVerdict, emptyFacts,
   type WorkFacts, type WorkVerdict, type GoalPhase,
 } from './lifecycle.js'
-import { createLedJudge, describeScene, type LedScene } from './led-judge.js'
+import { createLedJudge } from './led-judge.js'
 import { createSerialLink, isValidPortName, type LinkHandle, type LinkPortInfo, type LinkStatus } from './serial-link.js'
-import { FRAME, LED_STATE_CODE, PROGRESS_NONE, encodeFrame, clampBrightness, type LedState } from './led-protocol.js'
+import { clampBrightness, describeScene, sceneSignature, type LedScene, type LedState } from './led-scene.js'
+import { BAUD_RATE, LED_COUNT, MODE, encodeBuzzer, encodeFrame, type Beep } from './led-protocol.js'
 
 /** 控制器运行时配置（每次采样现读，设置页改了立刻生效）。 */
 export interface LedRuntimeConfig {
   readonly enabled: boolean
   readonly port: string
-  readonly baud: number
   readonly brightness: number
+  /** 蜂鸣器开关（硬件支持，可关）。 */
+  readonly buzzer: boolean
   readonly attention: boolean
   readonly idleOffMs: number
 }
@@ -37,8 +39,8 @@ export interface LedRuntimeConfig {
 export const DEFAULT_LED_CONFIG: LedRuntimeConfig = {
   enabled: false,
   port: 'auto',
-  baud: 115200,
   brightness: 160,
+  buzzer: true,
   attention: true,
   idleOffMs: 120_000,
 }
@@ -57,6 +59,10 @@ export interface LedControllerOptions {
   readonly now?: () => number
   /** 采样周期（毫秒）。500ms 足够跟手，也不会给宿主添负担。 */
   readonly tickMs?: number
+  /** 动画帧周期（毫秒）：只做渲染 + 写串口，默认 40ms（25fps）。 */
+  readonly frameMs?: number
+  /** 蜂鸣器总开关（默认开）。 */
+  readonly buzzer?: () => boolean
   /**
    * 允许驱动串口的判定（热重载用）。
    * 这个插件在 HMR 后可能同时存在新旧两个实例，而**串口是独占资源**：
@@ -72,14 +78,13 @@ export interface LedStatus {
   /** 'ok' | 'disabled' | 'no-agents-service' | 'no-session' */
   readonly reason: string
   readonly port: string
-  readonly baud: number
   readonly scene: LedScene
   readonly sceneText: string
   readonly link: LinkStatus
   /** 每个会话的判定（按"最需要你看"排序）。 */
   readonly verdicts: WorkVerdict[]
   /** 设备端能力（HELLO_ACK 回报；没握手成功时 null）。 */
-  readonly device: LinkStatus['device']
+  readonly device: { leds: number; verified: boolean } | null
   /** 距离上次"页面聚焦"上报过了多久（-1 = 从未上报过）。 */
   readonly focusedAgoMs: number
   /**
@@ -102,8 +107,10 @@ export interface LedController {
   acknowledge(): void
   /** 记一笔异常（后台任务失败、审批被拒…）——下一次判定进入 error。 */
   noteError(sessionId: string, reason: string): void
-  /** 直发一帧（对外 API 的"串口控制协议"出口）。 */
-  sendFrame(type: number, payload: readonly number[]): boolean
+  /** 直发一帧（对外 API 的串口控制协议出口；MODE 必须 0x00/0x01/0x02）。 */
+  sendFrame(mode: number, payload: readonly number[]): boolean
+  /** 立刻响一声（无源蜂鸣器）。 */
+  beep(beep?: Partial<Beep>): boolean
   /** 手动点灯（不经过判定；诊断与 bring-up 联调用）。 */
   preview(state: LedState, brightness?: number): boolean
 }
@@ -268,7 +275,7 @@ export function createLedController(options: LedControllerOptions): LedControlle
 
   const link = createSerialLink({
     port: options.config().port,
-    baud: options.config().baud,
+    baud: BAUD_RATE,
     open: options.open ?? (async (port: string, baud: number) => {
       const mod = await import('./serial-port.js')
       return mod.openSerialPort(port, baud)
@@ -276,17 +283,17 @@ export function createLedController(options: LedControllerOptions): LedControlle
     list: listPorts,
     now,
     log,
-    onEvent: (event) => {
-      // 板上按键 = "我知道了"：解除提醒闩（除"人回来了"之外的第二条解除路径）
-      if (event.code === 1 /* LED_EVENT.BUTTON_PRESS */) {
-        log('[led] 板上按键：解除提醒')
-        judge.acknowledge(now())
-        refresh()
-      }
-    },
   })
 
   let timer: (() => void) | null = null
+  let frameTimer: (() => void) | null = null
+  /** 上一次响过蜂鸣器的状态（同状态不重复响）。 */
+  let lastBeepState: LedScene['state'] | null = null
+  /** preview 的手动画面与生效截止时刻（压过判定画面一小段时间）。 */
+  let manualScene: LedScene | null = null
+  let manualUntil = 0
+  /** 排队中的提示音定时器（stop() 里统一清）。 */
+  const beepTimers = new Set<ReturnType<typeof setTimeout>>()
   let warnedNoAgents = false
   let disabledLogged = false
   let lastSceneSignature = ''
@@ -321,9 +328,9 @@ export function createLedController(options: LedControllerOptions): LedControlle
       return {
         enabled: c.enabled === true,
         port: typeof c.port === 'string' && c.port.trim() !== '' ? c.port.trim() : 'auto',
-        baud: Number.isFinite(c.baud) && c.baud >= 1200 ? Math.trunc(c.baud) : 115200,
-        // 显式亮度 0..254：255 是"用设备默认"的哨兵（见 led-protocol.ts 的说明）
+        // 亮度现在**纯主机端**（真固件没有亮度命令）：0..255 直接乘到每个通道
         brightness: clampBrightness(Math.trunc(c.brightness)),
+        buzzer: c.buzzer !== false,
         attention: c.attention !== false,
         idleOffMs: Math.max(0, Math.trunc(c.idleOffMs) || 0),
       }
@@ -336,7 +343,7 @@ export function createLedController(options: LedControllerOptions): LedControlle
   function tick(): void {
     const cfg = config()
     const at = now()
-    link.configure(cfg.port, cfg.baud)          // 端口/波特率改了立刻重连
+    link.configure(cfg.port, BAUD_RATE)   // 固件固定 115200，不给用户调          // 端口/波特率改了立刻重连
     // 串口探测**先于**启用判定：功能关着也要知道本机有没有设备（设置页靠它判「未连接」）
     if (lastPortScanAt === 0 || at - lastPortScanAt >= PORT_SCAN_MS) {
       lastPortScanAt = at
@@ -353,23 +360,6 @@ export function createLedController(options: LedControllerOptions): LedControlle
       })
       judgeConfigKey = key
     }
-
-    // 首次采样时"有没有设备"还没结论（枚举在路上）：先别驱动，等这次枚举回来再说。
-    // 只挡"正在枚举"这一小段；枚举**失败**时不留死锁（devicePresent 保持上次值/undefined，
-    // 下面继续走，让链路自己去试开）。
-    if (scanning) {
-      link.close()
-      return
-    }
-
-    // 没设备就等于没启用：**不驱动、也不去尝试打开串口**（用户要求"即使检测到已打开也关闭"）。
-    // 注意：这里不写回配置 —— 你的设置值原样保留，插上灯就会按它生效。
-    if (devicePresent === false) {
-      if (!noDeviceLogged) { log('[led] 未检测到串口设备：指示灯不驱动（插上后自动恢复）'); noDeviceLogged = true }
-      link.close()
-      return
-    }
-    noDeviceLogged = false
 
     if (!cfg.enabled) {
       if (!disabledLogged) { log('[led] 灯带未启用（设置页可开）'); disabledLogged = true }
@@ -417,21 +407,93 @@ export function createLedController(options: LedControllerOptions): LedControlle
     }
 
     const verdict = aggregateVerdict(ledger.evaluateAll(at))
-    const scene = judge.update(verdict, { lastFocusedAt: options.lastFocusedAt() }, at)
-    link.apply(scene)
+    const judged = judge.update(verdict, { lastFocusedAt: options.lastFocusedAt() }, at)
+    // preview（诊断端点/API）在 5 秒内压过判定画面，之后就自动回到判定结果
+    const manual = manualScene !== null && at < manualUntil ? manualScene : null
+    const scene = manual === null ? judged : manual
+    link.applyScene(scene)
 
-    const signature = `${LED_STATE_CODE[scene.state]}|${scene.flags}|${scene.brightness}|${scene.progress}`
+    const signature = sceneSignature(scene)
     if (signature !== lastSceneSignature) {
       lastSceneSignature = signature
       const why = verdict ? verdict.reasons.join('；') : '无会话'
       log(`[led] ${scene.state}${scene.latched ? '（提醒中）' : ''} → ${describeScene(scene)}｜${why}${missing.size > 0 ? `｜能力缺失：${[...missing].join(',')}` : ''}`)
     }
+    // 每次采样都问一遍（内部按"上次响过的状态"去重）：这样才能覆盖
+    // "跳变发生时还没握手、连上之后补一声"的情况 —— 否则插线前的完成就永远不响。
+    if (manual === null) maybeBeep(scene)
     const count = sessions.size
     if (count !== lastVerdictCount) {
       lastVerdictCount = count
       if (count === 0) log('[led] 当前没有活跃根会话')
     }
+    // 驱动条件（只挡"碰串口"，不影响上面的判定）：
+    //   · 正在枚举端口 → 先等结论；枚举**失败**时不留死锁（devicePresent 保持上次值/undefined）
+    //   · 没设备 → 不驱动、也不去尝试打开（用户要求"即使检测到已打开也关闭"）；
+    //     这里**不写回配置**：设置值原样保留，插上灯就按它生效。
+    if (scanning) { link.close(); return }
+    if (devicePresent === false) {
+      if (!noDeviceLogged) { log('[led] 未检测到串口设备：指示灯不驱动（插上后自动恢复）'); noDeviceLogged = true }
+      link.close()
+      return
+    }
+    noDeviceLogged = false
     link.tick()
+  }
+
+  /** 手动点灯（preview）：压过判定画面 5 秒，之后自动回到判定结果。 */
+  function setManualScene(scene: LedScene, ttlMs = 5000): void {
+    manualScene = scene
+    manualUntil = now() + Math.max(0, Math.trunc(ttlMs))
+    link.applyScene(scene)
+    link.tick()
+  }
+
+  /**
+   * 提示音（无源蜂鸣器）。挑音原则：**别刺耳、但要听得见**。
+   *   · 频率压在 440~1175Hz：无源蜂鸣器 2kHz 以上会很尖（像报警器），中低频柔和得多；
+   *   · 音量 40~55（0~100，占空比上限 50%）：够穿透房间，又不至于吓一跳；
+   *   · "完成"上行两声（880→1175）像轻轻的一个 ding-dong；"异常"低沉两声（440）更沉。
+   * 固件一次只响一个，所以多音用定时器排队（stop() 里统一清）。
+   */
+  const BEEP_PATTERNS: Record<string, ReadonlyArray<{ at: number; beep: Beep }>> = {
+    done: [
+      { at: 0, beep: { freqHz: 880, volume: 45, durationMs: 110 } },
+      { at: 160, beep: { freqHz: 1175, volume: 45, durationMs: 150 } },
+    ],
+    waiting: [
+      { at: 0, beep: { freqHz: 660, volume: 40, durationMs: 100 } },
+    ],
+    error: [
+      { at: 0, beep: { freqHz: 440, volume: 55, durationMs: 170 } },
+      { at: 220, beep: { freqHz: 440, volume: 50, durationMs: 170 } },
+    ],
+  }
+
+  /** 状态跳变时响一声（无源蜂鸣器）—— 躺床上不用看屏幕也知道结果。 */
+  function maybeBeep(scene: LedScene): void {
+    if (!cfgBuzzer()) return
+    if (scene.state === lastBeepState) return
+    const pattern = BEEP_PATTERNS[scene.state]
+    if (pattern === undefined) { lastBeepState = scene.state; return }
+    // 没连上就别记账：连上之后补响一次（否则"跳变发生在插线之前"就永远不响）
+    if (!link.beep(pattern[0].beep)) return
+    lastBeepState = scene.state
+    for (const step of pattern.slice(1)) queueBeep(step.beep, step.at)
+  }
+
+  /** 排队一次延迟响铃（避免"完成"的上行第二音被吞掉）。 */
+  function queueBeep(beep: Beep, delayMs: number): void {
+    const timer = setTimeout(() => {
+      beepTimers.delete(timer)
+      try { link.beep(beep) } catch (e) { /* 串口掉线就算了 */ }
+    }, Math.max(0, delayMs))
+    if (typeof (timer as any).unref === 'function') (timer as any).unref()
+    beepTimers.add(timer)
+  }
+
+  function cfgBuzzer(): boolean {
+    return config().buzzer
   }
 
   function refresh(): void {
@@ -453,12 +515,18 @@ export function createLedController(options: LedControllerOptions): LedControlle
           return () => clearInterval(handle)
         }
       timer = schedule(() => refresh(), ms)
-      log(`[led] 控制器已启动（每 ${ms}ms 采样一次）`)
+      // 第二个定时器：动画帧。~25fps 只做"渲染 + 写串口"，不重新采样事实
+      // （采样要读 agents/jobs/projections，30 倍频率太浪费）。
+      frameTimer = schedule(() => { try { link.tick() } catch (e) { /* 帧级异常不打断采样 */ } }, options.frameMs ?? 40)
+      log(`[led] 控制器已启动（每 ${ms}ms 采样、每 ${options.frameMs ?? 40}ms 渲染一帧）`)
       void scanPorts()          // 立刻探一次设备：设置页首屏就能给出正确的状态词
       refresh()
     },
     stop() {
       if (timer) { try { timer() } catch (e) { /* ignore */ } timer = null }
+      if (frameTimer) { try { frameTimer() } catch (e) { /* ignore */ } frameTimer = null }
+      for (const t of beepTimers) clearTimeout(t)
+      beepTimers.clear()
       link.close()
     },
     refresh,
@@ -476,12 +544,12 @@ export function createLedController(options: LedControllerOptions): LedControlle
         enabled: cfg.enabled,
         reason,
         port: cfg.port,
-        baud: cfg.baud,
+        baud: BAUD_RATE,
         scene: judge.scene,
         sceneText: describeScene(judge.scene),
         link: linkStatus,
         verdicts,
-        device: linkStatus.device,
+        device: linkStatus.verified ? { leds: LED_COUNT, verified: true } : null,
         focusedAgoMs: options.lastFocusedAt() > 0 ? at - options.lastFocusedAt() : -1,
         devicePresent,
         ports: availablePorts,
@@ -496,23 +564,48 @@ export function createLedController(options: LedControllerOptions): LedControlle
       ledger.noteError(root, reason, now())
       refresh()
     },
-    sendFrame(type, payload) {
+    sendFrame(mode, payload) {
       const cfg = config()
       if (!cfg.enabled) return false
-      return link.sendFrame(type, payload)
+      // 真固件只认 3 条命令：0x00 验证 / 0x01 7 灯颜色 / 0x02 蜂鸣。
+      // 长度与命令码都交给 encodeFrame 校验（未知 MODE 直接抛，不会把垃圾写进串口）。
+      try {
+        return link.rawFrame(encodeFrameChecked(mode, payload))
+      } catch (e) {
+        log(`[led] 拒绝自定义帧：${(e as Error).message}`)
+        return false
+      }
+    },
+    beep(beep?: Partial<Beep>) {
+      const cfg = config()
+      if (!cfg.enabled) return false
+      const merged: Beep = {
+        freqHz: Number(beep && beep.freqHz !== undefined ? beep.freqHz : 1800),
+        volume: Number(beep && beep.volume !== undefined ? beep.volume : 60),
+        durationMs: Number(beep && beep.durationMs !== undefined ? beep.durationMs : 120),
+      }
+      return link.rawFrame(encodeBuzzer(merged))
     },
     preview(state, brightness) {
       const cfg = config()
       if (!cfg.enabled) return false
-      return link.sendFrame(FRAME.SCENE, [
-        LED_STATE_CODE[state],
-        0,
-        brightness === undefined ? cfg.brightness : clampBrightness(Math.trunc(brightness)),
-        PROGRESS_NONE,
-        0xff,
-      ])
+      // 直接改画面（不经过判定），下一帧就会渲染出来；不写配置、不影响闩
+      setManualScene({
+        state, flags: 0,
+        brightness: brightness === undefined ? cfg.brightness : clampBrightness(Math.trunc(brightness)),
+        latched: false,
+        reason: 'preview',
+      })
+      return true
     },
   }
+}
+
+/** 校验并编码自定义帧（对外 API 用；未知 MODE / 长度不对都抛）。 */
+function encodeFrameChecked(mode: number, payload: readonly number[]): Buffer {
+  const known = mode === MODE.VERIFY || mode === MODE.LEDS || mode === MODE.BUZZER
+  if (!known) throw new Error(`未知 MODE 0x${Number(mode).toString(16)}（真固件只支持 0x00/0x01/0x02）`)
+  return encodeFrame(mode, payload)
 }
 
 /** 校验设置页填进来的端口名（任意字符串不能直接进 CreateFileW）。 */
@@ -522,5 +615,5 @@ export function sanitizeLedPort(raw: unknown): string {
   return isValidPortName(text) ? text : ''
 }
 
-/** 帧编码的再导出：对外 API 要发自定义帧时不必依赖内部路径。 */
-export { encodeFrame }
+/** 协议编码的再导出：对外 API 要发自定义帧时不必依赖内部路径。 */
+export { encodeFrame, encodeLeds, encodeVerify } from './led-protocol.js'

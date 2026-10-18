@@ -153,6 +153,8 @@ test('对外 API v1.1.0-led.1：可探测版本与能力，未知字段忽略，
   assert.equal(api.notify({ title: 'x', 未来字段: 1 }).ok, true, '未知字段一律忽略')
 })
 
+// ── LED 控制面（AI Status Lights 真协议）──────────────────────────────────
+
 test('LED 控制面：没接灯带时 led 为 null（调用方必须判空）', () => {
   const api = createNotifyApi({ notify: () => ({ queued: true }), enqueue: () => true })
   assert.equal(api.led, null)
@@ -160,86 +162,93 @@ test('LED 控制面：没接灯带时 led 为 null（调用方必须判空）', 
   assert.ok(api.capabilities.includes('led.scene'))
 })
 
-test('LED 控制面：语义帧/效果/亮度/进度/确认都能下发，非法载荷如实拒绝', () => {
-  const frames = []
-  const acked = []
-  const previews = []
+test('LED 控制面：scene / beep / pixels / frame 都能下发，能力可探测', () => {
+  const calls = { frames: [], beeps: [], previews: [], acked: 0 }
   const port = {
     enabled: () => true,
-    sendFrame: (type, payload) => { frames.push({ type, payload }); return true },
-    acknowledge: () => acked.push(1),
-    preview: (state, brightness) => { previews.push({ state, brightness }); return true },
+    sendFrame: (mode, payload) => { calls.frames.push({ mode, payload }); return true },
+    beep: (beep) => { calls.beeps.push(beep); return true },
+    acknowledge: () => { calls.acked += 1 },
+    preview: (state, brightness) => { calls.previews.push({ state, brightness }); return true },
     status: () => ({ ok: true }),
   }
   const api = createNotifyApi({ notify: () => ({ queued: true }), enqueue: () => true, led: () => createLedApi(port) })
   const led = api.led
   assert.ok(led)
-  assert.equal(led.protocolVersion, '1.0.0-led.1')
-  assert.equal(led.wireVersion, 1)
+  assert.equal(led.version, '2.0.0-led.2')
+  assert.equal(led.leds, 7)
+  assert.ok(led.capabilities.includes('led.protocol.aisl'))
+  assert.ok(led.capabilities.includes('led.beep'))
 
-  assert.equal(led.scene({ state: 'done' }).queued, true)
-  assert.equal(frames[0].type, 0x02)
-  assert.equal(frames[0].payload[0], 0x03)          // done 的线码
-  assert.equal(led.effect({ effect: 'flow-both', speed: 9 }).ok, true)
-  assert.equal(frames[1].type, 0x03)
-  assert.equal(led.overlay({ effect: 'double-flash', ttlMs: 1500 }).ok, true)
-  assert.equal(led.brightness(120).ok, true)
-  assert.equal(led.progress(42).ok, true)
-  assert.equal(led.clear().ok, true)
-  assert.equal(led.acknowledge().ok, true)
-  assert.equal(acked.length, 1)
-  assert.equal(led.preview('waiting', 90).ok, true)
-  assert.deepEqual(previews, [{ state: 'waiting', brightness: 90 }])
+  assert.equal(led.scene('done').queued, true)
+  assert.deepEqual(calls.previews, [{ state: 'done', brightness: undefined }])
+  assert.equal(led.scene('waiting', { brightness: 90 }).ok, true)
+  assert.deepEqual(calls.previews[1], { state: 'waiting', brightness: 90 })
 
-  // 非法载荷：拒绝但**不写串口**
-  const before = frames.length
-  assert.equal(led.scene({ state: 'nope' }).reason, 'invalid-payload')
-  assert.equal(led.scene(null).ok, false)
-  assert.equal(led.effect({ effect: '不存在' }).ok, false)
-  assert.equal(led.brightness('abc').ok, false)
-  assert.equal(led.progress(NaN).ok, false)
-  assert.equal(led.frame({ type: 0x82, payload: [] }).reason, 'unsupported-frame')
-  assert.equal(frames.length, before, '被拒绝的请求一个字节都不该写出去')
+  assert.equal(led.beep({ freqHz: 880, volume: 45, durationMs: 110 }).queued, true)
+  assert.equal(calls.beeps.length, 1)
+
+  const pixels = Array.from({ length: 7 }, () => ({ r: 10, g: 20, b: 30 }))
+  assert.equal(led.pixels(pixels).queued, true)
+  assert.equal(calls.frames[0].mode, 0x01)
+  assert.equal(calls.frames[0].payload.length, 21)
+
+  assert.equal(led.frame(0x00).queued, true)
+  assert.equal(calls.frames[1].mode, 0x00)
+
+  assert.equal(led.acknowledge(), undefined)
+  assert.equal(calls.acked, 1)
+  assert.deepEqual(led.status(), { ok: true })
 })
 
-test('LED 控制面：灯带没启用时请求合法但不入队（reason=led-disabled）', () => {
-  const port = {
-    enabled: () => false,
-    sendFrame: () => { throw new Error('不该被调用') },
-    acknowledge: () => {},
-    preview: () => false,
-    status: () => ({}),
-  }
-  const led = createLedApi(port)
-  const outcome = led.scene({ state: 'running' })
-  assert.equal(outcome.ok, true)
-  assert.equal(outcome.queued, false)
-  assert.equal(outcome.reason, 'led-disabled')
-})
-
-test('LED 控制面：链路没连上时如实回 link-down（不假装成功）', () => {
-  const port = {
-    enabled: () => true,
-    sendFrame: () => false,
-    acknowledge: () => {},
-    preview: () => false,
-    status: () => ({}),
-  }
-  const led = createLedApi(port)
-  assert.equal(led.scene({ state: 'error' }).reason, 'link-down')
-})
-
-test('LED 控制面：原始帧走白名单，且载荷先过一遍编码校验', () => {
+test('LED 控制面：非法载荷如实拒绝，且一个字节都不写', () => {
   const frames = []
-  const led = createLedApi({
+  const port = {
     enabled: () => true,
-    sendFrame: (type, payload) => { frames.push({ type, payload }); return true },
+    sendFrame: (mode, payload) => { frames.push({ mode, payload }); return true },
+    beep: () => true,
     acknowledge: () => {},
     preview: () => true,
     status: () => ({}),
+  }
+  const led = createLedApi(port)
+  assert.equal(led.scene('nope').reason, 'invalid-payload')
+  assert.equal(led.scene('done', { brightness: Number.NaN }).reason, 'invalid-payload')
+  assert.equal(led.beep({ freqHz: Number.NaN }).reason, 'invalid-payload')
+  assert.equal(led.pixels([{ r: 0, g: 0, b: 0 }]).reason, 'invalid-payload')
+  assert.equal(led.pixels(Array.from({ length: 7 }, () => ({ r: 300, g: 0, b: 0 }))).reason, 'invalid-payload')
+  assert.equal(led.frame(0x03).reason, 'unsupported-frame')
+  assert.equal(led.frame(0x01, [1, 2, 3]).reason, 'invalid-payload')
+  assert.equal(frames.length, 0, '被拒绝的请求不该写串口')
+})
+
+test('LED 控制面：灯带没启用时请求合法但不入队（reason=led-disabled）', () => {
+  const led = createLedApi({
+    enabled: () => false,
+    sendFrame: () => { throw new Error('不该被调用') },
+    beep: () => { throw new Error('不该被调用') },
+    acknowledge: () => {},
+    preview: () => false,
+    status: () => ({}),
   })
-  assert.equal(led.frame({ type: 0x08, payload: [] }).ok, true)
-  assert.equal(frames[0].type, 0x08)
-  assert.equal(led.frame({ type: 'x' }).ok, false)
-  assert.equal(led.frame({ type: 0x01, payload: new Array(40).fill(0) }).ok, false, '超长载荷在 API 层就被挡住')
+  const outcome = led.scene('running')
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.queued, false)
+  assert.equal(outcome.reason, 'led-disabled')
+  assert.equal(led.beep({}).reason, 'led-disabled')
+  assert.equal(led.frame(0x00).reason, 'led-disabled')
+})
+
+test('LED 控制面：链路没连上时如实回 link-down（不假装成功）', () => {
+  const led = createLedApi({
+    enabled: () => true,
+    sendFrame: () => false,
+    beep: () => false,
+    acknowledge: () => {},
+    preview: () => false,
+    status: () => ({}),
+  })
+  assert.equal(led.scene('error').reason, 'link-down')
+  assert.equal(led.beep({ freqHz: 660 }).reason, 'link-down')
+  assert.equal(led.pixels(Array.from({ length: 7 }, () => ({ r: 1, g: 2, b: 3 }))).reason, 'link-down')
 })

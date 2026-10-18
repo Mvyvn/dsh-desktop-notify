@@ -1,228 +1,209 @@
-// 串口链路层单测（假句柄，不需要真硬件）
+// 串口链路（真协议）：握手 / 像素流 / 去重 / 心跳 / 重连
 //
-// 板子还没打，但链路逻辑必须现在就能验证。这里锁住：
-//   · 打开后先握手（HELLO），随后按画面变化发 SCENE
-//   · **去重**：画面没变不重复写；到心跳周期才重发（这就是"平均带宽 < 20 B/s"的来源）
-//   · 写失败 → 进 error 状态并退避，退避期内不重试
-//   · 收包：HELLO_ACK 更新设备信息、EVENT 回调按键
-//   · 端口 "auto" → 从枚举结果里挑（COM3+ 优先）
-//   · 配置变化（设置页改端口/波特率）→ 断开重连
+// 全部用注入的假句柄跑，不需要真板子。真实打开的路径见 serial-port.ts（Windows: koffi）。
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSerialLink, sceneSignature, pickAutoPort, isValidPortName, RECONNECT_BACKOFF_MS } from '../lib/serial-link.js'
-import { encodeFrame, createFrameParser, FRAME, REPLY } from '../lib/led-protocol.js'
+import {
+  createSerialLink, pickAutoPort, isValidPortName, RECONNECT_BACKOFF_MS,
+} from '../lib/serial-link.js'
+import { VERIFY_REPLY, encodeLeds, encodeBuzzer } from '../lib/led-protocol.js'
+import { OFF_SCENE } from '../lib/led-scene.js'
+import { renderPixels } from '../lib/led-render.js'
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
-const scene = (patch = {}) => Object.assign({ state: 'running', flags: 0, brightness: 160, progress: 255, latched: false, reason: '' }, patch)
 
-/** 假串口：记录写入、可注入读取与失败。 */
-function fakePort() {
-  const state = { written: [], reads: [], closed: 0, failWrite: false, failOpen: '', opened: null }
-  state.handle = {
-    write(bytes) {
-      if (state.failWrite) return 0
-      state.written.push(Buffer.from(bytes))
-      return bytes.length
+function makeLink(port = 'COM7', options = {}) {
+  const state = { now: 1000 }
+  const written = []
+  const opened = []
+  const failing = { open: '', write: false }
+  let queue = options.reply === false ? Buffer.alloc(0) : Buffer.from(VERIFY_REPLY, 'ascii')
+  const handle = {
+    write(buf) {
+      if (failing.write) throw new Error('写入失败')
+      written.push(Buffer.from(buf))
+      return buf.length
     },
-    read() { return state.reads.shift() ?? Buffer.alloc(0) },
-    close() { state.closed += 1 },
+    read() {
+      const out = queue
+      queue = Buffer.alloc(0)
+      return out
+    },
+    close() {},
   }
-  state.open = async (port, baud) => {
-    if (state.failOpen) throw new Error(state.failOpen)
-    state.opened = { port, baud }
-    return state.handle
-  }
-  state.frames = (type) => {
-    const parser = createFrameParser()
-    return state.written.flatMap((buf) => parser.push(buf)).filter((f) => f.type === type)
-  }
-  return state
-}
-
-function makeLink(port, overrides = {}) {
-  const fake = fakePort()
-  const clock = { now: 1000 }
-  const events = []
-  const link = createSerialLink(Object.assign({
+  const link = createSerialLink({
     port,
-    baud: 115200,
-    open: fake.open,
-    list: async () => [{ path: 'COM1', label: '' }, { path: 'COM7', label: '' }],
-    now: () => clock.now,
-    onEvent: (e) => events.push(e),
+    open: async (p, b) => {
+      if (failing.open) throw new Error(failing.open)
+      opened.push({ port: p, baud: b })
+      return handle
+    },
+    list: options.list || (async () => [{ path: 'COM7', label: 'USB-SERIAL CH340' }]),
+    now: () => state.now,
+    log: () => {},
+    verifyTimeoutMs: 1000,
     heartbeatMs: 5000,
-  }, overrides))
-  return { fake, clock, link, events }
+  })
+  return {
+    link, written, opened, failing,
+    advance(ms) { state.now += ms },
+    /** 连接到握手通过（省得每个用例重复三行）。 */
+    async connect() {
+      link.tick()
+      await flush()
+      link.tick()
+      await flush()
+      assert.equal(link.status().state, 'ready', `握手应成功：${JSON.stringify(link.status())}`)
+    },
+  }
 }
 
-test('打开串口后先发握手（HELLO），随后才发画面', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  link.apply(scene())
-  link.tick()
+test('握手：打开后先发验证帧，收到 "AI Status Lights OK" 才算连上', async () => {
+  const h = makeLink('COM7')
+  h.link.tick()
   await flush()
-  const hello = fake.frames(FRAME.HELLO)
-  assert.equal(hello.length, 1)
-  assert.equal(fake.opened.port, 'COM7')
-  assert.equal(fake.opened.baud, 115200)
-  link.tick()
-  assert.equal(fake.frames(FRAME.SCENE).length, 1)
-  assert.equal(link.status().state, 'ready')
-  assert.equal(link.status().lastWriteAt, clock.now)
+  assert.equal(h.opened.length, 1)
+  assert.equal(h.opened[0].baud, 115200)
+  assert.equal(h.link.status().state, 'verifying')
+  assert.equal(h.written[0].toString('hex'), '55aa00ffbb')
+  h.link.tick()
+  await flush()
+  const status = h.link.status()
+  assert.equal(status.state, 'ready')
+  assert.equal(status.verified, true)
+  assert.equal(status.reply.verifies, 1)
 })
 
-test('画面没变不重复写；到心跳周期才重发（去重是带宽的关键）', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  link.apply(scene())
-  link.tick(); await flush()
-  link.tick()                                  // 第一次发
-  assert.equal(fake.frames(FRAME.SCENE).length, 1)
-  clock.now += 1000
-  link.tick()                                  // 没变、没到心跳 → 不发
-  assert.equal(fake.frames(FRAME.SCENE).length, 1)
-  clock.now += 4000
-  link.tick()                                  // 累计 5s → 心跳重发
-  assert.equal(fake.frames(FRAME.SCENE).length, 2)
-  link.apply(scene({ state: 'done' }))         // 画面变化 → 立刻发
-  link.tick()
-  assert.equal(fake.frames(FRAME.SCENE).length, 3)
-  assert.equal(fake.frames(FRAME.SCENE)[2].payload[0], 3)
+test('握手超时：回包没来 → verify-timeout + 退避重试（不是本板子就别硬点亮）', async () => {
+  const h = makeLink('COM7', { reply: false })
+  h.link.tick()
+  await flush()
+  h.advance(1200)
+  h.link.tick()
+  await flush()
+  const status = h.link.status()
+  assert.equal(status.state, 'error')
+  assert.equal(status.errorCode, 'verify-timeout')
+  assert.ok(status.retryInMs > 0)
+  assert.match(status.lastError, /没有回应验证帧/)
 })
 
-test('稳态带宽：心跳 5s 一次，平均 < 5 字节/秒', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  link.apply(scene())
-  link.tick(); await flush()
-  link.tick()
-  const base = fake.written.reduce((n, b) => n + b.length, 0)
-  for (let i = 0; i < 60; i += 1) { clock.now += 5000; link.tick() }
-  const total = fake.written.reduce((n, b) => n + b.length, 0) - base
-  // 60 次心跳 × 11 字节 / 300 秒 ≈ 2.2 B/s
-  assert.ok(total / 300 < 5, `实际 ${(total / 300).toFixed(2)} B/s`)
+test('端口 auto：从枚举里挑（优先 CH340）', async () => {
+  const h = makeLink('auto', {
+    list: async () => [
+      { path: 'COM3', label: 'Intel 串行' },
+      { path: 'COM11', label: 'USB-SERIAL CH340' },
+    ],
+  })
+  await h.connect()
+  assert.equal(h.opened[0].port, 'COM11')
 })
 
-test('写失败 → error + 退避；退避期内不重试，到点才重开', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  link.apply(scene())
-  link.tick(); await flush()
-  fake.failWrite = true
-  link.tick()
-  assert.equal(link.status().state, 'error')
-  assert.match(link.status().lastError, /写入不完整/)
-  assert.equal(fake.closed, 1)
-  clock.now += RECONNECT_BACKOFF_MS[0] - 1
-  link.tick()
-  assert.equal(link.status().state, 'error')     // 还没到点
-  clock.now += 1
-  fake.failWrite = false
-  link.tick(); await flush()
-  assert.equal(link.status().state, 'ready')
-  assert.equal(link.status().framesSent > 0, true)
+test('一个串口都没有 → errorCode=no-device（"还没接线"，不是故障）', async () => {
+  const h = makeLink('auto', { list: async () => [] })
+  h.link.tick()
+  await flush()
+  const status = h.link.status()
+  assert.equal(status.errorCode, 'no-device')
+  assert.match(status.lastError, /没有找到任何串口设备/)
+  assert.ok(status.retryInMs > 0)
 })
 
-test('打不开端口 → error，退避后自动重试（板子还没插上也不会刷爆日志）', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  fake.failOpen = '端口被占用'
-  link.tick(); await flush()
-  assert.equal(link.status().state, 'error')
-  assert.match(link.status().lastError, /端口被占用/)
-  assert.ok(link.status().retryInMs > 0)
-  fake.failOpen = ''
-  clock.now += RECONNECT_BACKOFF_MS[0]
-  link.tick(); await flush()
-  assert.equal(link.status().state, 'ready')
+test('打不开端口 → open-failed；写失败 → write-failed', async () => {
+  const h = makeLink('COM7')
+  h.failing.open = '打不开串口 COM7'
+  h.link.tick()
+  await flush()
+  assert.equal(h.link.status().errorCode, 'open-failed')
+  h.failing.open = ''
+  h.advance(RECONNECT_BACKOFF_MS[0])
+  await h.connect()
+  h.link.applyScene({ state: 'running', flags: 0, brightness: 200, latched: false, reason: '' })
+  h.failing.write = true
+  h.link.tick()
+  assert.equal(h.link.status().errorCode, 'write-failed')
 })
 
-test('端口 auto：从枚举里挑（COM3+ 优先，COM1 让位）', async () => {
-  const { fake, link } = makeLink('auto')
-  link.tick(); await flush()
-  assert.equal(fake.opened.port, 'COM7')
-  assert.equal(link.status().port, 'COM7')
+test('连上后：画面渲染成 26 字节 LEDS 帧；像素没变不重复写；5s 心跳重发', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  h.written.length = 0
+  h.link.applyScene({ state: 'waiting', flags: 0, brightness: 200, latched: false, reason: '' })
+  h.link.tick()
+  const first = h.written[0]
+  assert.equal(first.length, 26)
+  assert.equal(first[0], 0x55)
+  assert.equal(first[1], 0xaa)
+  assert.equal(first[2], 0x01, 'MODE 0x01 = 设 7 灯颜色')
+  assert.equal(first[25], 0xbb)
+  h.link.tick()
+  assert.equal(h.written.length, 1, '同一时刻像素没变 → 不写')
+  h.advance(5000)
+  h.link.tick()
+  assert.equal(h.written.length, 2, '心跳到点要重发')
 })
 
-test('端口 auto 且一个串口都没有 → errorCode=no-device（"还没接线"，不是故障）', async () => {
-  const { link } = makeLink('auto', { list: async () => [] })
-  link.tick(); await flush()
-  assert.equal(link.status().state, 'error')
-  assert.match(link.status().lastError, /没有找到任何串口设备/)
-  // 关键：设置页据此说"未连接"而不是"异常" —— 没插灯不是故障
-  assert.equal(link.status().errorCode, 'no-device')
-  assert.ok(link.status().retryInMs > 0, '仍然按退避重试：插上就自动连')
+test('动画在动时每帧都写（像素变了就该发）', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  h.written.length = 0
+  h.link.applyScene({ state: 'running', flags: 0, brightness: 200, latched: false, reason: '' })
+  h.link.tick()
+  h.advance(200)
+  h.link.tick()
+  assert.equal(h.written.length, 2, '彗星在动，两帧像素不同')
 })
 
-test('打不开端口 → errorCode=open-failed；写失败 → write-failed（与"没插设备"分开）', async () => {
-  const { fake, link, clock } = makeLink('COM7')
-  fake.failOpen = '打不开串口 COM7'
-  link.tick(); await flush()
-  assert.equal(link.status().errorCode, 'open-failed')
-  fake.failOpen = ''
-  clock.now += RECONNECT_BACKOFF_MS[0]      // 退避到点才重试
-  link.tick(); await flush()
-  assert.equal(link.status().errorCode, '', '打开成功后清掉故障码')
-  link.apply(scene())                       // 有画面才谈得上写
-  fake.failWrite = true
-  link.tick()
-  assert.equal(link.status().errorCode, 'write-failed')
+test('像素内容与渲染器一致（链路不偷偷改画面）', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  h.written.length = 0
+  const scene = { state: 'done', flags: 0, brightness: 255, latched: false, reason: '' }
+  h.link.applyScene(scene)
+  h.link.tick()
+  const expected = encodeLeds(renderPixels(scene, 1000))
+  assert.equal(h.written[0].toString('hex'), expected.toString('hex'))
 })
 
-test('收包：HELLO_ACK 更新设备信息，EVENT 触发回调（板上按键=我知道了）', async () => {
-  const { fake, link, events } = makeLink('COM7')
-  link.tick(); await flush()
-  fake.reads.push(encodeFrame(REPLY.HELLO_ACK, 0, [1, 60, 200, 0x1f, 0]))
-  fake.reads.push(encodeFrame(REPLY.EVENT, 0, [1, 0]))
-  link.apply(scene())
-  link.tick()          // 一次 tick 读一包：先拿 HELLO_ACK
-  link.tick()          // 再读一包：拿 EVENT
-  const device = link.status().device
-  assert.equal(device.wireVersion, 1)
-  assert.equal(device.leds, 60)
-  assert.equal(device.maxBrightness, 200)
-  assert.equal(device.caps, 0x001f)
-  assert.deepEqual(events, [{ code: 1, arg: 0 }])
+test('蜂鸣：10 字节 MODE 0x02（握手前不发）', async () => {
+  const h = makeLink('COM7')
+  h.link.tick()
+  await flush()
+  assert.equal(h.link.beep({ freqHz: 2000, volume: 100, durationMs: 500 }), false, '没握手就不该发')
+  h.link.tick()
+  await flush()
+  h.written.length = 0
+  assert.equal(h.link.beep({ freqHz: 2000, volume: 100, durationMs: 500 }), true)
+  assert.equal(
+    h.written[0].toString('hex'),
+    encodeBuzzer({ freqHz: 2000, volume: 100, durationMs: 500 }).toString('hex'),
+  )
 })
 
-test('配置变化（设置页改了端口）→ 关旧句柄、下次 tick 重开', async () => {
-  const { fake, link } = makeLink('COM7')
-  link.tick(); await flush()
-  assert.equal(link.status().state, 'ready')
-  link.configure('COM9', 9600)
-  assert.equal(fake.closed, 1)
-  assert.equal(link.status().state, 'idle')
-  link.tick(); await flush()
-  assert.equal(fake.opened.port, 'COM9')
-  assert.equal(fake.opened.baud, 9600)
+test('close() 之后状态是 disabled，且不再写', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  h.link.close()
+  assert.equal(h.link.status().state, 'disabled')
+  h.written.length = 0
+  h.link.tick()
+  assert.equal(h.written.length, 0)
 })
 
-test('sendFrame 在未连接时返回 false（对外 API 要如实回报）', () => {
-  const { link } = makeLink('COM7')
-  assert.equal(link.sendFrame(FRAME.PING, []), false)
-})
-
-test('close 之后状态为 disabled', async () => {
-  const { link } = makeLink('COM7')
-  link.tick(); await flush()
-  link.close()
-  assert.equal(link.status().state, 'disabled')
-})
-
-test('sceneSignature 只用线上真正表达的字段', () => {
-  const a = sceneSignature(scene({ reason: 'A' }))
-  const b = sceneSignature(scene({ reason: 'B' }))
-  assert.equal(a, b)
-  assert.notEqual(a, sceneSignature(scene({ brightness: 161 })))
-})
-
-test('pickAutoPort：USB 串口优先且编号大的在前；空列表返回空串', () => {
+test('pickAutoPort / isValidPortName', () => {
   assert.equal(pickAutoPort([]), '')
-  assert.equal(pickAutoPort([{ path: 'COM1' }, { path: 'COM3' }, { path: 'COM12' }]), 'COM12')
-  assert.equal(pickAutoPort([{ path: 'COM1' }, { path: 'COM2' }]), 'COM2')
-  assert.equal(pickAutoPort([{ path: '/dev/ttyAMA0' }, { path: '/dev/ttyUSB0' }]), '/dev/ttyUSB0')
+  assert.equal(pickAutoPort([{ path: 'COM3', label: '' }, { path: 'COM11', label: 'CH340' }]), 'COM11')
+  assert.equal(pickAutoPort([{ path: 'COM3', label: '' }, { path: 'COM9', label: '' }]), 'COM9')
+  assert.equal(pickAutoPort([{ path: '/dev/ttyUSB0', label: '' }]), '/dev/ttyUSB0')
+  assert.equal(isValidPortName('COM7'), true)
+  assert.equal(isValidPortName('/dev/ttyUSB0'), true)
+  assert.equal(isValidPortName('auto'), false)
+  assert.equal(isValidPortName(''), false)
+  assert.equal(isValidPortName('COM7; rm -rf'), false)
 })
 
-test('isValidPortName：只接受 COMx 与 /dev/xxx', () => {
-  assert.equal(isValidPortName('COM7'), true)
-  assert.equal(isValidPortName('com12'), true)
-  assert.equal(isValidPortName('/dev/ttyUSB0'), true)
-  assert.equal(isValidPortName(''), false)
-  assert.equal(isValidPortName('; rm -rf /'), false)
-  assert.equal(isValidPortName('COM7; echo'), false)
+test('OFF_SCENE 常量的形状（链路默认画面）', () => {
+  assert.equal(OFF_SCENE.state, 'off')
+  assert.equal(OFF_SCENE.brightness, 0)
 })

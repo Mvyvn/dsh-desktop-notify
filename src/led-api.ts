@@ -1,41 +1,37 @@
 // 对外 LED 控制 API —— 本分支专属的「串口控制协议」对外面（严格档）
 //
-// 其它插件经 `ctx.get('desktopNotify').led` 使用；协议版本与主线通知 API 分开标注，
-// 因为**这个分支不并入主线**：
-//   · NOTIFY_API_VERSION  → '1.1.0-led.1'（通知 API 的次版本，新增 led 能力）
-//   · LED_API_VERSION     → '1.0.0-led.1'（串口控制协议的特殊版本，本分支专属）
-//   · LED_WIRE_VERSION    → 1（真正上串口的帧版本，固件在 HELLO_ACK 里回报）
+// 其它插件经 `ctx.get('desktopNotify').led` 使用。硬件是 AI_Status_Lights
+// （https://github.com/Mvyvn/AI_Status_Lights）：7 颗 WS2812B + 无源蜂鸣器，
+// 线协议只有三条命令（验证 / 设 7 灯颜色 / 蜂鸣），见 led-protocol.ts。
 //
 // 设计原则与主线一致（见 api.ts 的版本约定）：
 //   1. 未知字段一律忽略；非法**取值**一律拒绝并如实回报 reason，不猜意图；
 //   2. 结果对象只增不改；
 //   3. capabilities 让调用方探测能力，而不是靠版本号猜。
 //
-// 为什么 API 不直接暴露"写字节"：裸字节会让调用方绕过 LEN/CRC/类型校验，
-// 一路把设备写进没人能复现的状态。这里只放行**白名单帧类型**（FRAME 里的那些），
-// 而且载荷仍然走同一套 clamp 逻辑（见 frame()）。
+// 为什么不暴露"裸写字节"：裸字节能绕过 LEN/校验/命令白名单，把设备写进没人能复现的
+// 状态。这里只放行真固件支持的三个 MODE，且载荷长度必须精确匹配。
 
 import {
-  FRAME, LED_EFFECTS, LED_STATES, LED_WIRE_VERSION, LED_EFFECT_CODE,
-  clampInt, clampBrightness, encodeFrame, rgbToRgb332,
-  scenePayload, effectPayload, overlayPayload, type LedEffect, type LedState,
+  LED_COUNT, MODE, PAYLOAD_LEN, encodeFrame, clampInt,
+  type Beep, type Pixels,
 } from './led-protocol.js'
+import { LED_STATES, clampBrightness, type LedState } from './led-scene.js'
 
 /** 本分支的串口控制协议版本（与通知 API 版本分开标注）。 */
-export const LED_API_VERSION = '1.0.0-led.1'
+export const LED_API_VERSION = '2.0.0-led.2'
 
 /** LED 能力清单（只增不减）。 */
 export const LED_API_CAPABILITIES: readonly string[] = [
-  'led.protocol.v1',   // 线协议 v1
-  'led.scene',         // 语义状态帧（绿/红/黄/白）
-  'led.effect',        // 显式效果（流动/呼吸/闪烁/彩虹…）
-  'led.overlay',       // 带 TTL 的瞬态覆盖层
-  'led.brightness',    // 亮度
-  'led.progress',      // 进度条（1 字节百分比）
-  'led.frame',         // 白名单原始帧
-  'led.ack',           // 解除提醒闩
-  'led.preview',       // 手动点灯（诊断/bring-up）
-  'led.status',        // 链路与判定状态
+  'led.protocol.aisl',   // AI Status Lights 线协议（55 AA / MODE / 累加和 / BB）
+  'led.pixels',          // 7 颗灯的像素（主机渲染后推流）
+  'led.scene',           // 语义状态（运行中/等你/完成/异常）
+  'led.brightness',      // 亮度（主机端乘到通道上）
+  'led.beep',            // 无源蜂鸣器（频率/音量/时长）
+  'led.frame',           // 白名单原始帧（MODE 0x00/0x01/0x02）
+  'led.ack',             // 解除提醒闩
+  'led.preview',         // 手动点灯（诊断/bring-up）
+  'led.status',          // 链路与判定状态
 ]
 
 /** 一次 LED 操作的结果。 */
@@ -43,190 +39,114 @@ export interface LedOpResult {
   readonly ok: boolean
   /** 是否真的写到了串口（链路没连上时为 false，但 ok 仍为 true——请求本身合法）。 */
   readonly queued: boolean
-  /** '' | 'invalid-payload' | 'led-disabled' | 'link-down' | 'unsupported-frame' | 'not-supported' */
+  /** '' | 'invalid-payload' | 'led-disabled' | 'link-down' | 'unsupported-frame' */
   readonly reason: string
   readonly protocolVersion: string
 }
 
 /** 控制器端口（由 led-controller 提供；本模块只依赖这个窄接口，便于单测）。 */
 export interface LedPort {
-  /** 灯带功能是否启用（设置页开关）。 */
+  /** 指示灯功能是否启用（设置页开关）。 */
   enabled(): boolean
-  sendFrame(type: number, payload: readonly number[]): boolean
+  sendFrame(mode: number, payload: readonly number[]): boolean
+  beep(beep?: Partial<Beep>): boolean
   acknowledge(): void
   preview(state: LedState, brightness?: number): boolean
   status(): unknown
 }
 
 export interface LedApi {
-  /** 串口控制协议版本（本分支特殊版本）。 */
-  readonly protocolVersion: string
-  /** 线协议版本（固件握手用）。 */
-  readonly wireVersion: number
+  readonly version: string
   readonly capabilities: readonly string[]
+  /** 板载灯珠数（固件写死 7 颗）。 */
+  readonly leds: number
+  /** 显示一个语义状态（主机渲染成像素后推流）。 */
+  scene(state: string, options?: { brightness?: number }): LedOpResult
+  /** 响一声（无源蜂鸣器）。 */
+  beep(beep?: Partial<Beep>): LedOpResult
+  /** 直接推 7 颗灯的像素。 */
+  pixels(pixels: Pixels): LedOpResult
+  /** 白名单原始帧：MODE 0x00（验证）/0x01（7 灯颜色）/0x02（蜂鸣）。 */
+  frame(mode: number, payload?: readonly number[]): LedOpResult
+  /** 解除提醒闩（等价于"我知道了"）。 */
+  acknowledge(): void
+  /** 链路 + 判定 + 设备状态快照。 */
   status(): unknown
-  scene(input: unknown): LedOpResult
-  effect(input: unknown): LedOpResult
-  overlay(input: unknown): LedOpResult
-  brightness(level: unknown): LedOpResult
-  progress(percent: unknown, color?: unknown): LedOpResult
-  clear(): LedOpResult
-  frame(input: unknown): LedOpResult
-  acknowledge(): LedOpResult
-  preview(state: unknown, brightness?: unknown): LedOpResult
 }
-
-/** 允许透过 frame() 直发的帧类型（设备→主机 的回包类型一律不放行）。 */
-const WRITABLE_FRAMES: readonly number[] = [
-  FRAME.HELLO, FRAME.SCENE, FRAME.EFFECT, FRAME.BRIGHT, FRAME.OVERLAY,
-  FRAME.PROGRESS, FRAME.CONFIG, FRAME.PING, FRAME.CLEAR, FRAME.PIXELS, FRAME.BYE,
-]
 
 function result(ok: boolean, queued: boolean, reason: string): LedOpResult {
   return { ok, queued, reason, protocolVersion: LED_API_VERSION }
 }
 
-/** 解析颜色：接受 '#rrggbb' / {r,g,b} / RGB332 数字；非法返回 null。 */
-function parseColor(raw: unknown): { r: number; g: number; b: number } | null {
-  if (raw === undefined || raw === null) return null
-  if (typeof raw === 'object') {
-    const c = raw as { r?: unknown; g?: unknown; b?: unknown }
-    return {
-      r: clampInt(Number(c.r), 0, 255),
-      g: clampInt(Number(c.g), 0, 255),
-      b: clampInt(Number(c.b), 0, 255),
-    }
-  }
-  if (typeof raw === 'string') {
-    const hex = /^#?([0-9a-f]{6})$/i.exec(raw.trim())
-    if (!hex || hex[1] === undefined) return null
-    const value = parseInt(hex[1], 16)
-    return { r: (value >> 16) & 0xff, g: (value >> 8) & 0xff, b: value & 0xff }
-  }
-  return null
-}
-
-function parseState(raw: unknown): LedState | null {
-  return typeof raw === 'string' && (LED_STATES as readonly string[]).includes(raw) ? raw as LedState : null
-}
-
-function parseEffect(raw: unknown): LedEffect | null {
-  return typeof raw === 'string' && (LED_EFFECTS as readonly string[]).includes(raw) ? raw as LedEffect : null
-}
-
-/**
- * 建 LED API。
- * @param port 由 led-controller 提供的窄接口
- */
+/** 建对外 API。`port` 由 led-controller 注入（单测可传假实现）。 */
 export function createLedApi(port: LedPort): LedApi {
-  /** 统一的发送出口：先判启用，再判链路。 */
-  const send = (type: number, payload: readonly number[]): LedOpResult => {
-    if (!port.enabled()) return result(true, false, 'led-disabled')
-    const queued = port.sendFrame(type, payload)
-    return result(true, queued, queued ? '' : 'link-down')
-  }
+  // 请求本身合法（ok=true），只是没启用所以不入队（queued=false）——沿用 api.ts 的约定
+  const disabled = (): LedOpResult | null => (port.enabled() ? null : result(true, false, 'led-disabled'))
 
   return {
-    protocolVersion: LED_API_VERSION,
-    wireVersion: LED_WIRE_VERSION,
+    version: LED_API_VERSION,
     capabilities: LED_API_CAPABILITIES,
-    status() {
-      return port.status()
-    },
-    scene(input) {
-      if (input === null || typeof input !== 'object') return result(false, false, 'invalid-payload')
-      const fields = input as Record<string, unknown>
-      const state = parseState(fields.state)
-      if (state === null) return result(false, false, 'invalid-payload')
-      const flags = clampInt(Number(fields.flags ?? 0), 0, 255)
-      const brightness = fields.brightness === undefined ? 0xff : clampBrightness(Number(fields.brightness))
-      const progress = fields.progress === undefined ? 0xff : clampInt(Number(fields.progress), 0, 100)
-      let accent = 0xff
-      const color = parseColor(fields.color)
-      if (color !== null) accent = rgbToRgb332(color.r, color.g, color.b)
-      return send(FRAME.SCENE, scenePayload({ state, flags, brightness, progress, accent }))
-    },
-    effect(input) {
-      if (input === null || typeof input !== 'object') return result(false, false, 'invalid-payload')
-      const fields = input as Record<string, unknown>
-      const effect = parseEffect(fields.effect)
-      if (effect === null) return result(false, false, 'invalid-payload')
-      const color = parseColor(fields.color)
-      const payload = effectPayload({
-        effect,
-        speed: fields.speed === undefined ? 5 : clampInt(Number(fields.speed), 1, 255),
-        brightness: fields.brightness === undefined ? 0xff : clampBrightness(Number(fields.brightness)),
-        param: fields.param === undefined ? 0 : clampInt(Number(fields.param), 0, 255),
-        ...(color === null ? {} : { color }),
-      })
-      return send(FRAME.EFFECT, payload)
-    },
-    overlay(input) {
-      if (input === null || typeof input !== 'object') return result(false, false, 'invalid-payload')
-      const fields = input as Record<string, unknown>
-      const effect = parseEffect(fields.effect)
-      if (effect === null) return result(false, false, 'invalid-payload')
-      const color = parseColor(fields.color)
-      const payload = overlayPayload({
-        effect,
-        speed: fields.speed === undefined ? 5 : clampInt(Number(fields.speed), 1, 255),
-        brightness: fields.brightness === undefined ? 0xff : clampBrightness(Number(fields.brightness)),
-        param: fields.param === undefined ? 0 : clampInt(Number(fields.param), 0, 255),
-        ttlMs: fields.ttlMs === undefined ? 3000 : clampInt(Number(fields.ttlMs), 0, 65535),
-        repeat: fields.repeat === undefined ? 0 : clampInt(Number(fields.repeat), 0, 255),
-        ...(color === null ? {} : { color }),
-      })
-      return send(FRAME.OVERLAY, payload)
-    },
-    brightness(level) {
-      const value = Number(level)
-      if (!Number.isFinite(value)) return result(false, false, 'invalid-payload')
-      return send(FRAME.BRIGHT, [clampInt(value, 0, 255)])
-    },
-    progress(percent, color) {
-      const value = Number(percent)
-      if (!Number.isFinite(value)) return result(false, false, 'invalid-payload')
-      const rgb = parseColor(color) ?? { r: 0, g: 200, b: 255 }
-      return send(FRAME.PROGRESS, [clampInt(value, 0, 100), rgbToRgb332(rgb.r, rgb.g, rgb.b), 0xff])
-    },
-    clear() {
-      return send(FRAME.CLEAR, [])
-    },
-    frame(input) {
-      if (input === null || typeof input !== 'object') return result(false, false, 'invalid-payload')
-      const fields = input as { type?: unknown; payload?: unknown }
-      const type = Number(fields.type)
-      if (!Number.isFinite(type) || !WRITABLE_FRAMES.includes(Math.trunc(type))) {
-        return result(false, false, 'unsupported-frame')
-      }
-      // 超长载荷**拒绝**而不是截断：悄悄砍掉调用方的字节会改变语义（而且对方看不到）
-      const raw = Array.isArray(fields.payload) ? fields.payload : []
-      if (raw.length > 32) return result(false, false, 'invalid-payload')
-      const payload = raw.map((b) => clampInt(Number(b), 0, 255))
-      // 先编一遍帧：载荷超长/类型非法在**这里**就暴露，而不是线上
-      try {
-        encodeFrame(Math.trunc(type), 0, payload)
-      } catch (e) {
+    leds: LED_COUNT,
+
+    scene(state, options = {}) {
+      const block = disabled(); if (block) return block
+      if (!LED_STATES.includes(state as LedState)) {
         return result(false, false, 'invalid-payload')
       }
-      return send(Math.trunc(type), payload)
-    },
-    acknowledge() {
-      port.acknowledge()
-      return result(true, true, '')
-    },
-    preview(state, brightness) {
-      const parsed = parseState(state)
-      if (parsed === null) return result(false, false, 'invalid-payload')
-      if (!port.enabled()) return result(true, false, 'led-disabled')
-      const level = brightness === undefined ? undefined : clampBrightness(Number(brightness))
-      const queued = level === undefined ? port.preview(parsed) : port.preview(parsed, level)
+      if (options.brightness !== undefined && !Number.isFinite(options.brightness)) {
+        return result(false, false, 'invalid-payload')
+      }
+      const brightness = options.brightness === undefined
+        ? undefined
+        : clampBrightness(clampInt(Math.trunc(options.brightness), 0, 255))
+      const queued = port.preview(state as LedState, brightness)
       return result(true, queued, queued ? '' : 'link-down')
     },
-  }
-}
 
-/** 便捷查询：某个效果名是否被本版本支持（调用方探测用）。 */
-export function ledSupportsEffect(name: string): boolean {
-  return typeof name === 'string' && name in LED_EFFECT_CODE
+    beep(beep = {}) {
+      const block = disabled(); if (block) return block
+      for (const key of ['freqHz', 'volume', 'durationMs'] as const) {
+        const value = beep[key]
+        if (value !== undefined && !Number.isFinite(value)) return result(false, false, 'invalid-payload')
+      }
+      const queued = port.beep(beep)
+      return result(true, queued, queued ? '' : 'link-down')
+    },
+
+    pixels(list) {
+      const block = disabled(); if (block) return block
+      if (!Array.isArray(list) || list.length !== LED_COUNT) return result(false, false, 'invalid-payload')
+      for (const px of list) {
+        if (!px || typeof px !== 'object') return result(false, false, 'invalid-payload')
+        for (const ch of [px.r, px.g, px.b]) {
+          if (!Number.isFinite(ch) || ch < 0 || ch > 255) return result(false, false, 'invalid-payload')
+        }
+      }
+      const payload: number[] = []
+      for (const px of list) payload.push(Math.trunc(px.r), Math.trunc(px.g), Math.trunc(px.b))
+      const queued = port.sendFrame(MODE.LEDS, payload)
+      return result(true, queued, queued ? '' : 'link-down')
+    },
+
+    frame(mode, payload = []) {
+      const block = disabled(); if (block) return block
+      const expected = PAYLOAD_LEN[mode]
+      if (expected === undefined) return result(false, false, 'unsupported-frame')
+      if (!Array.isArray(payload) || payload.length !== expected) return result(false, false, 'invalid-payload')
+      for (const byte of payload) {
+        if (!Number.isFinite(byte) || byte < 0 || byte > 255) return result(false, false, 'invalid-payload')
+      }
+      const queued = port.sendFrame(mode, payload.map((b) => Math.trunc(b)))
+      return result(true, queued, queued ? '' : 'link-down')
+    },
+
+    acknowledge() {
+      port.acknowledge()
+    },
+
+    status() {
+      void encodeFrame   // 保持对外/对内编码同源；此处只是避免"未使用"告警
+      return port.status()
+    },
+  }
 }

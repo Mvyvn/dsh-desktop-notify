@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createLedJudge, FOCUS_FRESH_MS } from '../lib/led-judge.js'
-import { SCENE_FLAG } from '../lib/led-protocol.js'
+import { SCENE_FLAG } from '../lib/led-scene.js'
 import { emptyFacts, createWorkLedger, aggregateVerdict } from '../lib/lifecycle.js'
 
 const T0 = 1_000_000
