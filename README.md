@@ -1,8 +1,8 @@
-# DSH 桌面通知（dsh-desktop-notify）
+# DSH 桌面通知（@mvyvn/dsh-desktop-notify）
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.0.0** · 兼容 **DSH `>=0.1.7-rc.2` 且 `<=0.2.0-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.1.0** · 兼容 **DSH `>=0.1.7-rc.2` 且 `<=0.2.0-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
 
 ## 依赖需求
 
@@ -34,7 +34,7 @@
 
 ### 方式一：按包名安装（推荐）
 
-在 DSH 的**插件管理**页选择添加插件，安装目标填包名 **`dsh-desktop-notify`**（仓库：<https://github.com/Mvyvn/dsh-desktop-notify>），插件管理器会从 registry 取包、装好运行时依赖、把本包登记为 profile bundle 并启用。
+在 DSH 的**插件管理**页选择添加插件，安装目标填包名 **`@mvyvn/dsh-desktop-notify`**（仓库：<https://github.com/Mvyvn/dsh-desktop-notify>），插件管理器会从 registry 取包、装好运行时依赖、把本包登记为 profile bundle 并启用。
 
 安装完成后**完全重启 `dsh web`**（结束进程重开，不是刷新页面），并**刷新一次 DSH 页面**。
 
@@ -84,7 +84,7 @@ npm run build        # tsc ×3 → lib/
 
 ### 逐类配置
 
-**每类推送可单独配置**（插件管理 → dsh-desktop-notify 卡片 → 设置）：总开关、调试模式、对外 API 开关，以及每种通知各自的开关与**静默模式三档**：
+**每类推送可单独配置**（插件管理 → @mvyvn/dsh-desktop-notify 卡片 → 设置）：总开关、调试模式、对外 API 开关，以及每种通知各自的开关与**静默模式三档**：
 
 | 静默模式 | 设置页显示 | 含义 |
 | --- | --- | --- |

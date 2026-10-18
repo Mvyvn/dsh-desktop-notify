@@ -55,7 +55,7 @@ function sendToast(item) {
   }
 }
 
-export const name = 'dsh-desktop-notify'
+export const name = '@mvyvn/dsh-desktop-notify'
 // 设置页由 settings 服务按这份模式生成；只有 .volatile() 字段可写（见 src/config.ts）
 export { Config }
 // connection/timer/webServer 是必需服务；jobs/sessions/sessionTitle/agents/fs 都是可选的，

@@ -12,6 +12,6 @@
 #     config: { debug: true }
 - insert:
     - id: desktop-notify
-      name: 'dsh-desktop-notify'
+      name: '@mvyvn/dsh-desktop-notify'
       config:
         debug: false

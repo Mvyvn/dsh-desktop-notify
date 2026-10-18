@@ -1,8 +1,8 @@
-# DSH Desktop Notify (dsh-desktop-notify)
+# DSH Desktop Notify (@mvyvn/dsh-desktop-notify)
 
 Desktop notifications for [DSH](https://github.com/deepseek-ai/dsh) on Windows and Linux. The plugin loads automatically on every `dsh web` start — no approval step.
 
-**Version 2.0.0** · Compatible with **DSH `>=0.1.7-rc.2` and `<=0.2.0-rc.2`** (the `peerDependencies` range declared in `package.json`; other minor releases inside that range are not individually tested).
+**Version 2.1.0** · Compatible with **DSH `>=0.1.7-rc.2` and `<=0.2.0-rc.2`** (the `peerDependencies` range declared in `package.json`; other minor releases inside that range are not individually tested).
 
 ## Building from source (developer path)
 
@@ -42,14 +42,14 @@ The manifest itself is a valid bundle: `dsh.bundle.patch` points at `cordis.patc
 - **Native, in-process delivery**: Windows calls WinRT through koffi, Linux talks to D-Bus (`org.freedesktop.Notifications`) directly — **no Python, no subprocess**
 
 ## Install
-> npm package: `dsh-desktop-notify` — repository: <https://github.com/Mvyvn/dsh-desktop-notify>.
+> npm package: `@mvyvn/dsh-desktop-notify` — repository: <https://github.com/Mvyvn/dsh-desktop-notify>.
 > The DSH plugin manager can install straight from the **npm package name**; an absolute local path also works.
 
 Prerequisite: **`dsh web` started at least once** (so the web profile exists). No Python, no pip.
 
 ### Option 1 — install by package name (recommended)
 
-In DSH open **Plugin Manager** → add plugin, and enter the package name **`dsh-desktop-notify`**. The plugin manager resolves it from the registry, installs the runtime dependencies, registers the package as a profile bundle and enables it.
+In DSH open **Plugin Manager** → add plugin, and enter the package name **`@mvyvn/dsh-desktop-notify`**. The plugin manager resolves it from the registry, installs the runtime dependencies, registers the package as a profile bundle and enables it.
 
 Then **fully restart `dsh web`** (stop the process and start it again — a page refresh is not enough) and **refresh the DSH page once**.
 
@@ -86,7 +86,7 @@ The "workspace" prefix is resolved per session (parallel sessions in different w
 
 ### Per-category settings
 
-**Every category is configurable** (Plugin Manager → the dsh-desktop-notify row → settings): a master switch, debug mode, the public-API switch, and per-category switches plus a **three-level silence mode**:
+**Every category is configurable** (Plugin Manager → the @mvyvn/dsh-desktop-notify row → settings): a master switch, debug mode, the public-API switch, and per-category switches plus a **three-level silence mode**:
 
 | Silence mode | Shown in the settings page | Meaning |
 | --- | --- | --- |

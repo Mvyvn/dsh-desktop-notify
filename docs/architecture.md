@@ -46,9 +46,9 @@ cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profi
 
 ## 常驻加载（无需审批）
 
-`dsh-desktop-notify` 是一个 **web profile bundle**：
+`@mvyvn/dsh-desktop-notify` 是一个 **web profile bundle**：
 
-1. 包内 `cordis.patch.yml` 声明一行 `- id: desktop-notify / name: 'dsh-desktop-notify'`；
+1. 包内 `cordis.patch.yml` 声明一行 `- id: desktop-notify / name: '@mvyvn/dsh-desktop-notify'`；
 2. profile 的 `package.json` 在 `dsh.profile.bundles` 中登记本包——每次 `dsh web` 启动，loader 按 bundle 层组合该行；
 3. 行存在即成为 loader entry，`dsh-client-modules` 扫描到包的 `dsh.client` 声明后，通过 `/plugins/<id>/client.js` 提供浏览器半区；
 4. 与动态插件不同，bundle 行属于 profile 本身，**不产生审批请求**；

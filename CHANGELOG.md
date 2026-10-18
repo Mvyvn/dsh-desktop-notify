@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.1.0] - 2026-10-02
+
+- **变更：npm 包名改为 `@mvyvn/dsh-desktop-notify`**。registry 上同名的 `dsh-desktop-notify` 是别人发布的另一个插件（`crazy-L118/dsh-desktop-notify`），继续用原名会让「按包名安装」装到错误的插件。`package.json` 的 `name`、`cordis.patch.yml` 的 bundle 行、宿主半区的 `export const name`、浏览器半区的模块 id / `SETTINGS_PKG` / `pluginNavigation.openBundle(...)` 全部换成新包名；**profile 的 `dsh.profile.bundles` 需同步改名**（旧名不会自动迁移）。GitHub 仓库与文档标题仍是 `dsh-desktop-notify`，日志前缀与 `$DSH_HOME/logs/dsh-desktop-notify/` 保留短名，不随包名变动。
+- 版本号随之升到 **2.1.0**（首次以新包名发布到 npm）。
+
 ## [2.0.0] - 2026-10-01
 
 - **新增：插件设置页**（挂 `plugins.row.config`，与 `dsh-path-guard` 同一做法）：总开关、调试模式、对外 API 开关，以及 **11 种预设推送各自的开关 + 静默模式**。宿主侧新增 schemastery `Config`（按官方 volatile 规则：整个数组 volatile、元素普通），并把所有开关改为**运行时重读**——设置页改完由 settings 服务原子写回 `cordis.patch.yml` 并原地重载，无需重启。

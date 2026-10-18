@@ -23,7 +23,7 @@ node --input-type=module -e "import('./lib/toast-linux.js').then(m => m.sendToas
 ### 方式一：插件管理器 → 按包名安装（推荐）
 
 1. DSH → **插件管理** → **添加插件**；
-2. 安装目标填包名 **`dsh-desktop-notify`**；
+2. 安装目标填包名 **`@mvyvn/dsh-desktop-notify`**；
 3. 插件管理器会从 registry 取包、装好运行时依赖 `koffi`（Windows 发 WinRT Toast 用），并把本包登记为 profile bundle 启用——宿主半区由包内 `cordis.patch.yml` 挂载，浏览器半区由 `dsh.client` 声明后自动提供；
 4. **完全重启 `dsh web`**（结束进程重开，不是刷新页面），并**刷新一次 DSH 页面**。
 
@@ -31,15 +31,15 @@ node --input-type=module -e "import('./lib/toast-linux.js').then(m => m.sendToas
 
 同一个入口，安装目标填**本机插件目录的实际路径**。管理器会用 `link:` 形态把它记进 profile 的 `dependencies`，后续改源码后重新 `npm run build` 即可生效。
 
-> `node_modules/dsh-desktop-notify` 必须是**指向包目录的符号链接**。实体目录会遮蔽链接——**不要**手工把目录拷进 profile 的 `node_modules`，也不要用 shell 脚本复刻安装步骤：依赖安装、bundle 选择、启用都归插件管理器负责。
+> `node_modules/@mvyvn/dsh-desktop-notify` 必须是**指向包目录的符号链接**。实体目录会遮蔽链接——**不要**手工把目录拷进 profile 的 `node_modules`，也不要用 shell 脚本复刻安装步骤：依赖安装、bundle 选择、启用都归插件管理器负责。
 
 ### npm 形态（开发者）
 
 ```bash
-npm i dsh-desktop-notify     # 包内自带构建产物 lib/，装完不需要再编译
+npm i @mvyvn/dsh-desktop-notify     # 包内自带构建产物 lib/，装完不需要再编译
 ```
 
-要在别的工程里引用，宿主半区 `import 'dsh-desktop-notify'`，浏览器半区 `dsh-desktop-notify/client`。
+要在别的工程里引用，宿主半区 `import '@mvyvn/dsh-desktop-notify'`，浏览器半区 `@mvyvn/dsh-desktop-notify/client`。
 
 ### 从源码构建（开发者路径）
 
@@ -69,7 +69,7 @@ Web Notification 路线需要浏览器通知权限，而浏览器要求用户手
 
 ## 配置一览
 
-插件管理 → dsh-desktop-notify 卡片 → **设置**：
+插件管理 → @mvyvn/dsh-desktop-notify 卡片 → **设置**：
 
 | 项 | 说明 |
 | --- | --- |
