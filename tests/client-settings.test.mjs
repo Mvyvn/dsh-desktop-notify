@@ -186,9 +186,13 @@ function loadSettingsSection({ form, ledStatus } = {}) {
     removeEventListener: remove('window'),
     dispatchEvent: () => {},
     EventSource: class {
-      constructor() { this.readyState = 0; this.handlers = {} }
-      addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn) }
-      close() { this.readyState = 2 }
+      constructor() {
+        this.onmessage = null
+        this.onerror = null
+        // 测试环境没有 SSE 服务：下一拍就报错，客户端应当退回轮询
+        setTimeout(() => { try { if (this.onerror) this.onerror() } catch (e) { /* ignore */ } }, 0)
+      }
+      close() {}
     },
   }
 
@@ -201,8 +205,8 @@ function loadSettingsSection({ form, ledStatus } = {}) {
   const fetches = []
   load(
     window, document,
-    (url) => {
-      fetches.push(String(url))
+    (url, options) => {
+      fetches.push({ url: String(url), body: options && options.body })
       // /dnotify/led 的响应可以按用例注入（其余端点回一个空壳即可）
       const payload = ledStatus !== undefined && String(url).indexOf('led') >= 0 ? ledStatus : { ok: true }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) })
@@ -258,7 +262,7 @@ test('串口那行的说明与标签左右排（不再另起一行），指示�
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 60, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -288,7 +292,7 @@ test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须�
       writable: true,
       value: {
         enabled: true, apiEnabled: true, debug: false, types: [],
-        ledEnabled: false, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160,
+        ledEnabled: false, ledPort: 'auto', ledBuzzer: true, ledBrightness: 60,
         ledAttention: true, ledIdleOffSec: 120,
       },
     }),
@@ -312,7 +316,7 @@ test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须�
   const words = texts(tree).join('|')
   // 想看最终文案长什么样：DSH_NOTIFY_DUMP_SETTINGS=1 node --test tests/client-settings.test.mjs
   if (process.env.DSH_NOTIFY_DUMP_SETTINGS) console.log('[设置页文案] ' + words.split('|').join(' / '))
-  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '亮度', '完成时响一声', '熄灯延时（秒）', '聚焦跟踪持续提醒', '各预设推送']) {
+  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '亮度（%）', '启用状态指示蜂鸣器', '聚焦跟踪持续提醒', '各预设推送']) {
     assert.ok(words.includes(label), `设置页应当渲染出「${label}」，实际文本：${words.slice(0, 240)}`)
   }
   // 用户明确要求：删掉的部分就是"不需要第二行字" —— 这些说明文案不许再出现
@@ -326,7 +330,7 @@ test('亮度/熄灯延时用标准步进控件：箭头按步长提交，且不�
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 60, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: (key, value) => { setCalls.push([key, value]) },
@@ -340,29 +344,27 @@ test('亮度/熄灯延时用标准步进控件：箭头按步长提交，且不�
     assert.equal(hits.length, 1, `应当有且只有一个「${label}」按钮`)
     return hits[0]
   }
-  byLabel('增大亮度').props.onClick()
-  assert.deepEqual(setCalls.pop(), ['ledBrightness', 170])
-  byLabel('减小亮度').props.onClick()
-  assert.deepEqual(setCalls.pop(), ['ledBrightness', 150])
-  byLabel('增大熄灯延时（秒）').props.onClick()
-  assert.deepEqual(setCalls.pop(), ['ledIdleOffSec', 130])
+  byLabel('增大亮度（%）').props.onClick()
+  assert.deepEqual(setCalls.pop(), ['ledBrightness', 65])
+  byLabel('减小亮度（%）').props.onClick()
+  assert.deepEqual(setCalls.pop(), ['ledBrightness', 55])
 
-  // 步进控件本体是标准胶囊（两个数值字段各一个）
+  // 步进控件本体是标准胶囊（只剩亮度一个）
   const pills = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-stepper')
-  assert.equal(pills.length, 2, '亮度/熄灯延时各一个步进控件（波特率由固件固定，已删）')
+  assert.equal(pills.length, 1, '只剩亮度一个步进控件（波特率、熄灯延时都已移除）')
   const inputs = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-input')
   assert.equal(inputs.length, 1, '串口用标准文本输入')
 
   // 胶囊宽度按位数撑开（DSH 自己的区间步进控件同款解法：calc(Nch + 52px) + 左右各 26px 内边距）
   const values = findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-stepper-value')
-  assert.deepEqual(values.map((n) => n.props.style.width), ['calc(3ch + 52px)', 'calc(3ch + 52px)'])
+  assert.deepEqual(values.map((n) => n.props.style.width), ['calc(2ch + 52px)'])
 })
 
 test('行标题格式：一律用标准设置字段的 13px / 字重 500（删掉第二行后不再显得又小又轻）', () => {
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 60, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -375,7 +377,7 @@ test('行标题格式：一律用标准设置字段的 13px / 字重 500（删�
     assert.equal(hits.length >= 1, true, `应当渲染出标题「${text}」`)
     return hits[0].props.style
   }
-  for (const text of ['启用任务状态指示灯', '聚焦跟踪持续提醒', '亮度', '完成时响一声', '熄灯延时（秒）', '串口']) {
+  for (const text of ['启用任务状态指示灯', '聚焦跟踪持续提醒', '亮度（%）', '启用状态指示蜂鸣器', '串口']) {
     assert.equal(labelOf(text).fontSize, '13px', `「${text}」应当用标准字段字号`)
     assert.equal(labelOf(text).fontWeight, 500, `「${text}」应当加粗（标准字段字重）`)
   }
@@ -420,8 +422,8 @@ test('指示灯状态：没插设备 → "未连接"（不是"异常"），且�
   const words = texts(mini.render(el())).join('|')   // 3) 状态已就绪
   assert.ok(words.includes('指示灯状态：未连接'), `没插设备应是"未连接"：${words.slice(0, 200)}`)
   assert.ok(words.includes('没有找到串口设备'), '要说明原因（短句）')
-  assert.equal(words.includes('异常'), false, '没插设备不该报成异常')
-  assert.equal(words.includes('画面：'), false, '没连上就别谈"画面"，免得让人以为灯在亮')
+  assert.equal(words.includes('指示灯状态：异常'), false, '没插设备不该报成异常（测试下拉里的「异常」是选项，不算）')
+  assert.equal(words.includes('灯珠'), false, '连上后的端口/灯珠细节不该再出现')
 })
 
 test('指示灯状态：功能没开 → "未启用"，且不显示"画面"', async () => {
@@ -445,7 +447,7 @@ test('指示灯状态：功能没开 → "未启用"，且不显示"画面"', as
   assert.equal(words.includes('画面：'), false, '没启用就别说画面')
 })
 
-test('指示灯状态：连上之后 → "运行中" + 端口/灯珠 + 画面', async () => {
+test('指示灯状态：连上之后只给「运行中」一个短词（端口/灯珠、画面都不要）', async () => {
   const form = {
     getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true, ledPort: 'COM7' } }),
     subscribe: () => () => {},
@@ -455,8 +457,8 @@ test('指示灯状态：连上之后 → "运行中" + 端口/灯珠 + 画面', 
     form,
     ledStatus: {
       ok: true, reason: 'ok',
-      link: { state: 'ready', port: 'COM7', baud: 115200, errorCode: '' },
-      device: { leds: 60, wireVersion: 1 },
+      link: { state: 'ready', port: 'COM13', baud: 115200, errorCode: '', verified: true },
+      device: { leds: 7, verified: true },
       scene: { state: 'done', flags: 1 },
     },
   })
@@ -468,8 +470,9 @@ test('指示灯状态：连上之后 → "运行中" + 端口/灯珠 + 画面', 
   await flush()
   const words = texts(mini.render(el())).join('|')
   assert.ok(words.includes('指示灯状态：运行中'), words.slice(0, 200))
-  assert.ok(words.includes('COM7 · 60 灯珠'), '已连接时给端口与灯珠数')
-  assert.ok(words.includes('画面：已完成（提醒中）'), '已连接时才显示画面')
+  assert.equal(words.includes('COM13'), false, '端口细节已按要求去掉')
+  assert.equal(words.includes('灯珠'), false, '灯珠数已按要求去掉')
+  assert.equal(words.includes('画面：'), false, '画面那一行已按要求去掉')
 })
 
 test('设置页样式表必须跟着代码更新（跨热重载的旧 CSS 不能被留在页面上）', () => {
@@ -491,7 +494,7 @@ test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/�
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
-      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 160, ledAttention: true, ledIdleOffSec: 120 },
+      value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto', ledBuzzer: true, ledBrightness: 60, ledAttention: true, ledIdleOffSec: 120 },
     }),
     subscribe: () => () => {},
     set: () => {},
@@ -584,4 +587,73 @@ test('插件 id 必须三处同源：bundle 注册 id / exports.name / 设置槽
   for (const site of ['id: PLUGIN_ID,', 'openBundle(PLUGIN_ID)', 'var SETTINGS_PKG = PLUGIN_ID', 'name = PLUGIN_ID']) {
     assert.ok(CLIENT_SOURCE.includes(site), '应当使用常量：' + site)
   }
+})
+
+test('蜂鸣器开关：紧跟指示灯开关，且**与指示灯开关同时**灰掉（同一个判据）', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const { Section, mini } = loadSettingsSection({
+    form,
+    // 没设备：两行都应当灰掉（之前蜂鸣器看"握手"、指示灯看"枚举"，灰的时间不同步）
+    ledStatus: { ok: true, reason: 'ok', devicePresent: false, link: { state: 'error', verified: false }, scene: { state: 'off', flags: 0 } },
+  })
+  const el = () => mini.React.createElement(Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  mini.render(el()); await flush()
+  mini.render(el()); await flush()
+  const tree = mini.render(el())
+  const words = texts(tree).join('|')
+  assert.ok(words.indexOf('启用任务状态指示灯') < words.indexOf('启用状态指示蜂鸣器'), '蜂鸣器开关应当紧跟指示灯开关')
+  const buzzer = findAll(tree, (n) => n.props && n.props['data-dsh-notify-setting'] === 'ledBuzzer')[0]
+  const led = findAll(tree, (n) => n.props && n.props['data-dsh-notify-setting'] === 'ledEnabled')[0]
+  assert.ok(buzzer, '应当渲染蜂鸣器开关')
+  assert.equal(buzzer.props.disabled, true, '没设备时蜂鸣器开关应当灰掉')
+  assert.equal(led.props.disabled, true, '没设备时指示灯开关应当灰掉')
+  assert.equal(buzzer.props.disabled, led.props.disabled, '两个开关的灰化必须同步（同一个判据）')
+})
+
+test('点击测试：菜单型选择控件（同预设行）+ 测试按钮，点击下发 op=test', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const h0 = loadSettingsSection({
+    form,
+    ledStatus: { ok: true, reason: 'ok', devicePresent: true, link: { state: 'ready', verified: true }, scene: { state: 'off', flags: 0 } },
+  })
+  const el = () => h0.mini.React.createElement(h0.Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  h0.mini.render(el()); await flush()
+  h0.mini.render(el()); await flush()
+  let tree = h0.mini.render(el())
+
+  // 触发按钮：与静默模式同款（无边框、32px、模块平台色）——不是原生 select
+  const trigger = findAll(tree, (n) => n.props && n.props['data-dsh-notify-led-test-select'] === '1')[0]
+  assert.ok(trigger, '应当有菜单型选择控件（不是原生 select）')
+  assert.equal(findAll(tree, (n) => n.props && n.props.className === 'dsh-notify-select').length, 0, '不该再用原生 select')
+
+  // 展开后应列出全部状态（含"模型运行中"和"熄灭"）
+  trigger.props.onClick()
+  tree = h0.mini.render(el())
+  const words = texts(tree).join('|')
+  assert.equal(words.includes('熄灭'), false, '不该再有「熄灭」测试项（会被误判成未连接）')
+  for (const label of ['模型运行中', '等待你', '已完成', '异常', '自检']) {
+    assert.ok(words.includes(label), `选项里应当有「${label}」`)
+  }
+
+  // 点「测试」：默认选中"已完成"，应当下发 op=test + kind=done
+  h0.fetches.length = 0
+  const button = findAll(tree, (n) => n.props && n.props['data-dsh-notify-led-test'] === '1')[0]
+  assert.ok(button, '应当有测试按钮')
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  await flush()
+  const posted = h0.fetches.find((f) => String(f.url).includes('led'))
+  assert.ok(posted, '点击应当请求 /dnotify/led')
+  assert.match(String(posted.body), /"op":"test"/)
+  assert.match(String(posted.body), /"kind":"done"/)
 })

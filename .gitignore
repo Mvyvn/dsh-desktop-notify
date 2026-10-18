@@ -29,3 +29,4 @@ firmware/host/sim
 firmware/host/sketch_check
 *.obj
 *.o
+.tmp-*

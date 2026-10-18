@@ -947,6 +947,9 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
           '.dsh-notify-stepper{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:72px;height:32px;border-radius:var(--dsw-radius-sm, 8px);background:var(--dsw-alias-bg-module-platform)}',
           '.dsh-notify-stepper input:focus-visible{outline:none}',
           '.dsh-notify-input:focus-visible{outline:none}',
+          '.dsh-notify-select{appearance:none;-webkit-appearance:none;-moz-appearance:none;outline:none;background-image:none}',
+          '.dsh-notify-select::-ms-expand{display:none}',
+          '.dsh-notify-select option{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}',
           '.dsh-notify-input::placeholder{color:var(--dsw-alias-label-dimmed)}',
           '.dsh-notify-input:disabled{opacity:0.6;cursor:default}',
           '.dsh-notify-stepper-value:disabled{opacity:0.6;cursor:default}',
@@ -1367,6 +1370,8 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var setStatus = pair[1]
         React.useEffect(function () {
           var alive = true
+          var source = null
+          var timer = null
           function poll() {
             post('led', { op: 'status' }).then(function (res: any) {
               if (alive) setStatus(res)
@@ -1374,9 +1379,41 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
               if (alive) setStatus({ ok: false, reason: 'unreachable' })
             })
           }
+          function startPolling() {
+            if (timer !== null) return
+            poll()
+            timer = setInterval(poll, 1000)
+          }
+          // 先立刻拉一次：首屏不必等 SSE 建连/首帧
           poll()
-          var timer = setInterval(poll, 3000)
-          return function () { alive = false; clearInterval(timer) }
+          // 之后优先用服务端事件（状态一变就推，不用等轮询周期）
+          var ES = (window as any).EventSource
+          if (typeof ES === 'function') {
+            try {
+              // 必须用 ROUTE_PREFIX（文档相对）：挂在子路径下时 'dnotify/led-events' 会解析错
+              source = new ES(ROUTE_PREFIX + '/led-events')
+              source.onmessage = function (event: any) {
+                if (!alive) return
+                try { setStatus(JSON.parse(event.data)) } catch (e) { /* 忽略坏帧 */ }
+              }
+              // 连接失败/断开：关掉事件源，退回轮询（SSE 自己会重连，但轮询兜底更稳）
+              source.onerror = function () {
+                if (!alive) return
+                try { source.close() } catch (e) { /* ignore */ }
+                source = null
+                startPolling()
+              }
+            } catch (e) {
+              startPolling()
+            }
+          } else {
+            startPolling()
+          }
+          return function () {
+            alive = false
+            if (source !== null) { try { source.close() } catch (e) { /* ignore */ } }
+            if (timer !== null) clearInterval(timer)
+          }
         }, [])
         return status
       }
@@ -1394,6 +1431,8 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var detail = ''
         var driving = false
         var noDevice = false
+        // 板子握手成功 = 检测到了这块板（含蜂鸣器）；没握手就没法确认，蜂鸣器开关灰掉
+        var buzzerPresent = !!(status && status.link && status.link.verified === true)
         if (status && status.ok !== false && status.reason !== 'unreachable') {
           var link = status.link || {}
           noDevice = status.devicePresent === false ||
@@ -1417,28 +1456,21 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         } else if (status) {
           dot = C.warn; state = '异常'    // 端点不可达也归到"异常"（不再有"未识别"这个词）
         }
-        return { dot: dot, state: state, detail: detail, driving: driving, noDevice: noDevice }
+        return { dot: dot, state: state, detail: detail, driving: driving, noDevice: noDevice, buzzerPresent: buzzerPresent }
       }
 
       /** 指示灯状态卡片（纯展示：状态由 Section 通过 useLedStatus 取好传进来）。 */
+      /**
+       * 指示灯状态卡片（纯展示）。
+       *
+       * 只留**一个状态短词**：端口/灯珠数、"画面：xxx" 这些细节按用户要求去掉了 ——
+       * 状态卡的目的就是"一眼看到有没有通、在什么状态"，多一行都是噪音。
+       */
       function LedStatusCard(props: any) {
         var status = props.status
         var view = ledStateOf(status)
         var dot = view.dot
         var state = view.state
-        var detail = view.detail
-
-        // 画面：灯此刻在做什么（短词）。运行中 / 等待你 / 已完成 / 异常 / 熄灭。
-        // 只有在**真的在驱动**（已连上链路）时才显示这一行 —— 没启用/没插设备时谈"画面"
-        // 只会让人以为灯在亮。
-        var SCENE_WORD: Record<string, string> = {
-          running: '运行中', waiting: '等待你', done: '已完成', error: '异常', off: '熄灭',
-        }
-        var sceneLine = ''
-        if (view.driving && status && status.scene && status.scene.state) {
-          sceneLine = '画面：' + (SCENE_WORD[status.scene.state] || status.scene.state) +
-            ((status.scene.flags & 1) === 1 ? '（提醒中）' : '')
-        }
         return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '8px', paddingBottom: '14px' } },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             h('span', { style: { flex: '0 0 auto', width: '8px', height: '8px', borderRadius: '999px', background: dot } }),
@@ -1454,8 +1486,128 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
                 },
               }, '我知道了')
               : null),
-          detail ? h('span', { style: { fontSize: '12px', color: C.sub } }, detail) : null,
-          sceneLine ? h('span', { style: { fontSize: '12px', color: C.sub } }, sceneLine) : null)
+          // 连上之后不再显示任何细节（端口/灯珠/画面都去掉）；只有**没连上**时才说明原因，
+          // 否则用户只看到一个"未连接/异常"却不知道为什么。
+          (!view.driving && view.detail)
+            ? h('span', { style: { fontSize: '12px', color: C.sub } }, view.detail)
+            : null)
+      }
+
+      /** 点击测试：选一种"动画 + 声音"，按一下推到板子上。 */
+      var TEST_OPTIONS = [
+        { value: 'running', label: '模型运行中' },
+        { value: 'waiting', label: '等待你' },
+        { value: 'done', label: '已完成' },
+        { value: 'error', label: '异常' },
+        { value: 'selftest', label: '自检' },
+      ]
+      /**
+       * 通用菜单型选择控件 —— 与「各预设推送」那行的静默模式**同一套**：
+       *   32px 无边框触发按钮（模块平台色 + 悬停底色）+ 浮层 menu + 打勾选中项。
+       * 不用原生 <select>：原生控件的外观跟着系统走，和这套设置页格格不入。
+       */
+      function SelectMenu(props: any) {
+        var pair = React.useState(false)
+        var open = pair[0]
+        var setOpen = pair[1]
+        var hoverPair = React.useState(false)
+        var hovered = hoverPair[0]
+        var setHovered = hoverPair[1]
+        var options = Array.isArray(props.options) ? props.options : []
+        var current = options.filter(function (o: any) { return o.value === props.value })[0] || options[0] || { label: '' }
+        var anchor = React.useRef(null)
+        React.useEffect(function () {
+          if (!open) return undefined
+          function onDoc(event: any) {
+            if (anchor.current && anchor.current.contains(event.target)) return
+            setOpen(false)
+          }
+          document.addEventListener('mousedown', onDoc)
+          return function () { document.removeEventListener('mousedown', onDoc) }
+        }, [open])
+        return h('div', { ref: anchor, style: { position: 'relative', flex: '0 0 auto' } },
+          h('button', {
+            type: 'button', disabled: props.disabled,
+            'aria-haspopup': 'menu', 'aria-expanded': open ? 'true' : 'false',
+            [`data-dsh-notify-${props.field}`]: '1',
+            onClick: function () { if (!props.disabled) setOpen(!open) },
+            onMouseEnter: function () { setHovered(true) },
+            onMouseLeave: function () { setHovered(false) },
+            style: {
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px',
+              width: props.width || '120px', height: '32px', padding: '0 8px', font: 'inherit',
+              fontSize: '13px', lineHeight: '20px', whiteSpace: 'nowrap',
+              cursor: props.disabled ? 'not-allowed' : 'pointer',
+              color: 'var(--dsw-alias-label-primary)',
+              background: hovered && !props.disabled
+                ? 'var(--dsw-alias-interactive-bg-hover)'
+                : 'var(--dsw-alias-bg-module-platform)',
+              border: 'none', borderRadius: 'var(--dsw-radius-sm, 8px)',
+              transition: 'background 120ms ease',
+              opacity: props.disabled ? 0.6 : 1,
+            },
+          },
+          h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'left' } }, current.label),
+          h('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true', style: { flex: '0 0 auto' } },
+            h('path', { d: 'M4 6l4 4 4-4' }))),
+          open ? h('div', {
+            role: 'menu',
+            style: {
+              position: 'absolute', zIndex: 100, top: 'calc(100% + 4px)', right: 0,
+              boxSizing: 'border-box', width: 'max-content', minWidth: props.menuMinWidth || '132px', maxWidth: '220px',
+              padding: '4px', display: 'flex', flexDirection: 'column',
+              background: 'var(--dsw-menu-surface-fill, var(--dsw-alias-bg-layer-1))',
+              color: 'var(--dsw-alias-label-primary)', border: 0,
+              backdropFilter: 'blur(20px) saturate(1.4)',
+              WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+              borderRadius: 'var(--dsw-radius-sm, 8px)',
+              ['--dsw-elevation-stroke-color']: 'var(--dsw-alias-border-l1)',
+              boxShadow: 'var(--dsw-elevation-prominent, 0 8px 24px rgba(0,0,0,.35))',
+              animation: 'dsh-notify-menu-in 130ms cubic-bezier(.2,.8,.2,1)',
+            },
+          }, options.map(function (opt: any) {
+            return h(MenuItem, {
+              key: opt.value,
+              label: opt.label,
+              selected: opt.value === props.value,
+              onClick: function () { setOpen(false); if (props.onChange) props.onChange(opt.value) },
+            })
+          })) : null)
+      }
+      function TestRow(props: any) {
+        var pair = React.useState('done')
+        var kind = pair[0]
+        var setKind = pair[1]
+        var tip = React.useState('')
+        var tipText = tip[0]
+        var setTip = tip[1]
+        var disabled = props.disabled === true
+        function run() {
+          if (disabled) return
+          post('led', { op: 'test', kind: kind }).then(function (res: any) {
+            setTip(res && res.ok ? '' : '未连接')
+          }, function () { setTip('未连接') })
+        }
+        return h('div', { className: 'dsh-notify-row', 'data-dsh-notify-setting': 'ledTest',
+          style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 0', minWidth: '0' } },
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', flex: '1 1 auto', minWidth: '90px' } },
+            h('span', { style: { fontSize: '13px', fontWeight: 500, lineHeight: '1.5', color: C.label } }, '点击测试'),
+            tipText ? h('span', { style: { fontSize: '12px', lineHeight: '1.5', color: C.tertiary } }, tipText) : null),
+          h('div', { style: { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '8px' } },
+            // 与「各预设推送」那行同款的菜单型选择控件（不再用原生 select）
+            h(SelectMenu, {
+              field: 'led-test-select', options: TEST_OPTIONS, value: kind,
+              width: '120px', menuMinWidth: '132px', disabled: disabled,
+              onChange: function (v: string) { setKind(v); setTip('') },
+            }),
+            h('button', {
+              type: 'button', 'data-dsh-notify-led-test': '1',
+              disabled: disabled, onClick: run,
+              style: Object.assign({}, CONTROL, {
+                width: 'auto', padding: '0 14px', cursor: disabled ? 'default' : 'pointer',
+                opacity: disabled ? 0.6 : 1,
+              }),
+            }, '测试')))
       }
       /**
        * 静默模式：分段控件（贴着标签，不用原生 select、不甩到最右侧）。
@@ -1602,6 +1754,9 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         // 否则配置到位后会触发 React 的 "Rendered more hooks…"（整棵设置树被打崩）。
         var ledStatus = useLedStatus()
         var ledView = ledStateOf(ledStatus)
+        // 「指示灯」整卡片的**唯一**不可用判据：没检测到设备。
+        // 之前每个控件各判各的（一个看枚举、一个看握手）→ 灰化不同步。
+        var ledDown = ledView.noDevice === true
         if (props && props.view === 'summary') return h('span', { style: { fontSize: '12px', color: C.sub } }, '桌面通知设置')
         if (!form) {
           // 区分"服务还没到"与"真的没有"：不再一律显示"正在读取配置…"
@@ -1656,30 +1811,28 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
               h(Title, null, '指示灯'),
               h('div', { className: 'dsh-notify-rows' },
                 h(LedStatusCard, { status: ledStatus }),
-                boolRow('ledEnabled', '启用任务状态指示灯', '', value.ledEnabled === true, ledView.noDevice),
-                boolRow('ledAttention', '聚焦跟踪持续提醒', '', value.ledAttention !== false),
+                // **整组统一灰化**：没检测到设备时，这张卡片里所有可操作项一起灰掉。
+                // 判据只有这一个（ledDown），不再出现"一个开关看枚举、另一个看握手"导致的时间差。
+                boolRow('ledEnabled', '启用任务状态指示灯', '', value.ledEnabled === true, ledDown),
+                boolRow('ledBuzzer', '启用状态指示蜂鸣器', '', value.ledBuzzer !== false, ledDown),
+                boolRow('ledAttention', '聚焦跟踪持续提醒', '', value.ledAttention !== false, ledDown),
                 // ⚠️ 必须走 h(TextRow/StepperRow, …) 而不是直接调用：那两个组件里有 hooks，
                 // 直接调用会把 hook 记到 Section 头上，而 Section 有若干提前 return 的分支
                 // （读取中/不可配置/summary）—— 配置到位后一渲染就触发 React 的
                 // "Rendered more hooks than during the previous render"，整棵设置树被打崩。
                 h(TextRow, {
-                  key: 'ledPort', field: 'ledPort', label: '串口', disabled: !writable, hintInline: true,
+                  key: 'ledPort', field: 'ledPort', label: '串口', disabled: !writable || ledDown, hintInline: true,
                   hint: 'auto = 自动模式（USB 串口优先），也可手动填写 COM5 或 /dev/ttyUSB0 等',
                   value: value.ledPort === undefined ? 'auto' : value.ledPort,
                   onChange: function (v: string) { form.set('ledPort', v) },
                 }),
                 h(StepperRow, {
-                  key: 'ledBrightness', field: 'ledBrightness', label: '亮度', disabled: !writable,
-                  step: 10, min: 0, max: 255, value: value.ledBrightness === undefined ? 160 : value.ledBrightness,
+                  key: 'ledBrightness', field: 'ledBrightness', label: '亮度（%）', disabled: !writable || ledDown,
+                  step: 5, min: 0, max: 100, value: value.ledBrightness === undefined ? 65 : value.ledBrightness,
                   onChange: function (v: number) { form.set('ledBrightness', v) },
                 }),
-                // 蜂鸣器：硬件真实支持（无源蜂鸣器），可关
-                boolRow('ledBuzzer', '完成时响一声', '', value.ledBuzzer !== false),
-                h(StepperRow, {
-                  key: 'ledIdleOffSec', field: 'ledIdleOffSec', label: '熄灯延时（秒）', disabled: !writable,
-                  step: 10, min: 0, max: 1800, value: value.ledIdleOffSec === undefined ? 120 : value.ledIdleOffSec,
-                  onChange: function (v: number) { form.set('ledIdleOffSec', v) },
-                }))),
+                // 最下方：点击测试（选一种动画 + 声音，按一下看效果）
+                h(TestRow, { key: 'ledTest', disabled: ledDown }))),
             h('div', { style: cardStyle },
               h(Title, null, '各预设推送'),
               h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '0 28px', alignItems: 'start' } },

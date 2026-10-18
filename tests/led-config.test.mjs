@@ -17,14 +17,14 @@ test('缺省：全部回落到默认（LED 默认关闭）', () => {
 
 test('正常取值原样通过', () => {
   const cfg = resolveLedConfig({
-    ledEnabled: true, ledPort: 'COM7', ledBrightness: 120, ledBuzzer: false, ledAttention: true, ledIdleOffSec: 30,
+    ledEnabled: true, ledPort: 'COM7', ledBrightness: 60, ledBuzzer: false, ledAttention: true,
   })
   assert.equal(cfg.enabled, true)
   assert.equal(cfg.port, 'COM7')
-  assert.equal(cfg.brightness, 120)
+  assert.equal(cfg.brightness, Math.round(0.6 * 255))
   assert.equal(cfg.buzzer, false)
   assert.equal(cfg.attention, true)
-  assert.equal(cfg.idleOffMs, 30000)
+  assert.equal(cfg.idleOffMs, 120000, '熄灯延时硬编码')
 })
 
 test('亮度夹到 0..255（纯主机端：没有"设备默认"哨兵了）', () => {
@@ -41,12 +41,6 @@ test('端口：空串回落到 auto，非字符串不炸', () => {
   assert.equal(resolveLedConfig({ ledPort: '/dev/ttyUSB0' }).port, '/dev/ttyUSB0')
 })
 
-test('熄灯延时：负数/非法回落到默认，0 保留（0 = 永不熄）', () => {
-  assert.equal(resolveLedConfig({ ledIdleOffSec: 0 }).idleOffMs, 0)
-  assert.equal(resolveLedConfig({ ledIdleOffSec: -5 }).idleOffMs, DEFAULT_LED_CONFIG.idleOffMs)
-  assert.equal(resolveLedConfig({ ledIdleOffSec: 'x' }).idleOffMs, DEFAULT_LED_CONFIG.idleOffMs)
-})
-
 test('布尔字段只认真正的布尔值', () => {
   assert.equal(resolveLedConfig({ ledEnabled: 'yes' }).enabled, false)
   assert.equal(resolveLedConfig({ ledEnabled: true }).enabled, true)
@@ -58,8 +52,9 @@ test('布尔字段只认真正的布尔值', () => {
 test('schemastery 模式里有这些字段（设置页据此渲染），且不再有 ledBaud', () => {
   const shape = Config && Config.dict ? Config.dict : null
   if (!shape) return
-  for (const key of ['ledEnabled', 'ledPort', 'ledBrightness', 'ledBuzzer', 'ledAttention', 'ledIdleOffSec']) {
+  for (const key of ['ledEnabled', 'ledPort', 'ledBrightness', 'ledBuzzer', 'ledAttention']) {
     assert.ok(key in shape, `配置模式缺少 ${key}`)
   }
   assert.equal('ledBaud' in shape, false, '波特率由固件固定，不该再是配置项')
+  assert.equal('ledIdleOffSec' in shape, false, '熄灯延时已改为硬编码')
 })

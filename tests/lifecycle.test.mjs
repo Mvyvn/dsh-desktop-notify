@@ -71,12 +71,12 @@ test('目标 complete / paused / 无目标 → done', () => {
   assert.equal(ledger.evaluate('c', T0 + 1).phase, 'done')
 })
 
-test('目标 blocked → waiting（要人来解，不是完成）', () => {
+test('目标 blocked → error（任务阻塞属于异常，不是"等你回话"）', () => {
   const ledger = createWorkLedger()
-  ledger.observe('s1', facts({ goalPhase: 'blocked' }), T0)
-  const v = ledger.evaluate('s1', T0 + 1)
-  assert.equal(v.phase, 'waiting')
-  assert.match(v.reasons.join(' '), /目标已阻塞/)
+  ledger.observe('s1', { ...emptyFacts(), goalPhase: 'blocked' }, T0)
+  const v = ledger.evaluateAll(T0)[0]
+  assert.equal(v.phase, 'error', 'blocked 应当判成 error')
+  assert.match(v.reasons.join(' '), /目标阻塞/)
 })
 
 test('有人等你回答 → waiting，且优先级高于一切运行中工作', () => {
@@ -145,7 +145,8 @@ test('evaluateAll 排序：最需要人看的排前面，同阶段先发生的�
   ledger.observe('running', facts({ agentRunning: true }), T0)
   ledger.observe('done', facts({}), T0)
   const order = ledger.evaluateAll(T0 + 6000).map((v) => v.sessionId)
-  assert.deepEqual(order, ['earlier', 'later', 'running', 'done'])
+  // 优先级：等待(1) ＞ 完成(2) ＞ 运行中(3)
+  assert.deepEqual(order, ['earlier', 'later', 'done', 'running'])
 })
 
 test('久未更新的会话会被清理（常驻进程里不能无限长）', () => {
@@ -198,4 +199,56 @@ test('phaseLabel 五态都有中文', () => {
   assert.equal(phaseLabel('waiting'), '等待你')
   assert.equal(phaseLabel('done'), '已完成')
   assert.equal(phaseLabel('error'), '异常')
+})
+
+test('快速切换会话：空闲会话不闪绿，真完成才播报（判据是宿主事件，不是时间窗口）', () => {
+  const ledger = createWorkLedger()
+  // s1 在跑（turn/start 已溯源）
+  ledger.observe('s1', facts({ agentRunning: true, everRan: true }), T0)
+  assert.equal(ledger.evaluate('s1', T0 + 100).phase, 'running')
+
+  // 切到一个**空闲会话**：它是 done，但 completed=false → 不播报绿灯
+  ledger.observe('idle', facts({}), T0 + 200)
+  const idle = ledger.evaluate('idle', T0 + 200)
+  assert.equal(idle.phase, 'done')
+  assert.equal(idle.completed, false, '空闲会话不是完成')
+
+  // s1 真的跑完了（everRan=true 且没活了）→ completed=true，立刻可播报
+  ledger.observe('s1', facts({ everRan: true }), T0 + 300)
+  const done = ledger.evaluate('s1', T0 + 300)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.completed, true, '跑过再停 = 真完成')
+})
+test('空闲会话（从没干过活）的 done 不算完成 → 不会点亮绿灯', () => {
+  const ledger = createWorkLedger()
+  // s1 在跑；s2 是刚切过去的空闲会话（从没跑过任何东西）
+  ledger.observe('s1', Object.assign(emptyFacts(), { agentRunning: true }), T0)
+  ledger.observe('s2', emptyFacts(), T0)
+  const all = ledger.evaluateAll(T0 + 100)
+  const s2 = all.find((v) => v.sessionId === 's2')
+  assert.equal(s2.phase, 'done', '空闲会话的阶段仍然是 done（没有未结算工作）')
+  assert.equal(s2.completed, false, '但它**不是一次完成**，不该播报绿灯')
+
+  // s2 真的干过活再停下 → 才算完成
+  ledger.observe('s2', Object.assign(emptyFacts(), { agentRunning: true }), T0 + 1000)
+  ledger.evaluate('s2', T0 + 1100)
+  ledger.observe('s2', emptyFacts(), T0 + 2000)
+  const settled = ledger.evaluate('s2', T0 + 3000)
+  assert.equal(settled.phase, 'done')
+  assert.equal(settled.completed, true, '干过活再停下才是完成')
+})
+
+test('快速回合：宿主事件说"跑过"，即使采样从没见到 pending>0 也算完成', () => {
+  const ledger = createWorkLedger()
+  // 只有 everRan 为 true（turn/start 事件来过），采样里从来没有 pending
+  ledger.observe('s1', facts({ everRan: true }), T0)
+  const settled = ledger.evaluate('s1', T0 + 100)
+  assert.equal(settled.phase, 'done')
+  assert.equal(settled.completed, true, '事件溯源认定它跑过 → 这是一次真完成')
+
+  // 对照：同样没有 pending，但 everRan=false（纯空闲会话）→ 不算完成
+  ledger.observe('s2', facts({}), T0)
+  const idle = ledger.evaluate('s2', T0 + 100)
+  assert.equal(idle.phase, 'done')
+  assert.equal(idle.completed, false, '空闲会话不是完成')
 })

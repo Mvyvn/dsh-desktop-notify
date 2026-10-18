@@ -2,7 +2,7 @@
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.1.0（分支 `feat/led-serial-ticker`）** · 兼容 **DSH `>=0.1.7-rc.2` 且 `<=0.2.0-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.1.0（分支 `feat/led-serial-ticker`）** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
 
 > ⚠️ 本分支**不并入主线**：它在主线通知插件之上加了一套 **USB 串口 LED 状态灯**，
 > 并把对外 API 标成特殊版本 `2.0.0-led.2`。主线行为不受影响（LED 默认关闭）。
@@ -23,7 +23,9 @@ CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115
   **不会随时间自己安静下来**；回到页面（或调 `ack`）才解除（判定见 `src/led-judge.ts`）。
 
 协议只有三条命令（验证 / 设 7 颗灯颜色 / 蜂鸣），**动画和亮度都在主机端算好再推**：
-26 字节/帧，约 25fps ≈ 650 B/s，115200 只占 ~6%。
+26 字节/帧，目标 **240fps** ≈ 6.2 KB/s，占 115200 的 **54.2%**（一帧线上 2.257ms，
+线速上限 443fps）。实测与背压策略见 [`docs/serial-protocol.md`](docs/serial-protocol.md#帧率与背压)
+和 `scripts/led-fps-probe.mjs`。
 
 | 文档 | 内容 |
 | --- | --- |
@@ -40,8 +42,8 @@ CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115
 
 | 项 | 要求 |
 | --- | --- |
-| **DSH** | **`>= 0.1.7-rc.2` 且 `<= 0.2.0-rc.2`**。这段范围内本插件依赖的服务面（`connection` / `webServer` / `jobs` / `subagent` / `schedule` / `loader` / cordis）没有变化；范围外的版本不预先声称兼容 |
-| 包内声明 | `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.2 <=0.2.0-rc.2" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合（含更新的 0.2.x） |
+| **DSH** | **`>= 0.2.0-rc.2` 且 `<= 0.2.1-rc.2`**。这段范围内本插件依赖的服务面（`connection` / `webServer` / `jobs` / `subagent` / `schedule` / `loader` / cordis）没有变化；范围外的版本不预先声称兼容 |
+| 包内声明 | `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <=0.2.1-rc.2" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合（含更新的 0.2.x） |
 | 运行时 | Windows 需要 [koffi](https://koffi.dev/)（发 WinRT Toast，已声明为普通依赖，安装时自动装好）；Linux 无额外依赖（纯 JS 直连 D-Bus） |
 | 浏览器 | Firefox / Chromium 系（Web Notification 路线依赖 Service Worker 与 `WindowClient.focus()`，见下） |
 

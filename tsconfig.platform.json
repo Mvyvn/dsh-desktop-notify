@@ -29,6 +29,7 @@
     "src/winrt.ts",
     "src/toast-linux.ts",
     "src/serial-win32.ts",
+    "src/serial-worker.ts",
     "src/serial-posix.ts",
     "src/serial-port.ts",
     "src/index.ts"

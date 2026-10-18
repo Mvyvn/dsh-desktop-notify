@@ -14,7 +14,7 @@
 import type { LinkHandle, LinkPortInfo } from './serial-link.js'
 
 interface Win32Module {
-  openWin32Serial(path: string, baud: number, options?: { dtr?: boolean; rts?: boolean }): LinkHandle
+  openWin32Serial(path: string, baud: number, options?: { dtr?: boolean; rts?: boolean }): Promise<LinkHandle>
   listWin32SerialPorts(): LinkPortInfo[]
 }
 interface PosixModule {

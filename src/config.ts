@@ -85,12 +85,10 @@ export interface NotifyConfig {
   ledPort?: string
   /** 波特率（默认 115200；协议很省带宽，9600 也能跑）。 */
   ledBaud?: number
-  /** 基础亮度 0..255（固件还会乘上自己的全局上限）。 */
+  /** 基础亮度百分比 0..100（100% = 满亮）。 */
   ledBrightness?: number
   /** 聚焦提醒：人没回到 DSH 页面就一直提醒（需求第 2 条）。 */
   ledAttention?: boolean
-  /** 已完成且已看过之后多久熄灯（秒；0 = 一直留一点绿）。 */
-  ledIdleOffSec?: number
 }
 
 export const Config = z.object({
@@ -107,15 +105,16 @@ export const Config = z.object({
   ledEnabled: z.boolean().default(false).volatile(),
   ledPort: z.string().default('auto').volatile(),
   ledBuzzer: z.boolean().default(true).volatile(),
-  ledBrightness: z.number().default(160).volatile(),
+  ledBrightness: z.number().default(65).volatile(),
   ledAttention: z.boolean().default(true).volatile(),
-  ledIdleOffSec: z.number().default(120).volatile(),
 })
 
 /** LED 控制器运行时配置（严格档类型；led-controller.ts 的结构与之兼容）。 */
 export interface LedRuntimeConfig {
   readonly enabled: boolean
   readonly port: string
+  /** 总开关（插件的 enabled）：关掉就是整块插件停用，灯也要灭。 */
+  readonly master: boolean
   /** 蜂鸣器开关。 */
   readonly buzzer: boolean
   readonly brightness: number
@@ -124,13 +123,17 @@ export interface LedRuntimeConfig {
 }
 
 /** 默认值集中在这里：设置页"恢复默认"与宿主缺字段时都回落到这一份。 */
+/** 熄灯延时：设置页不再暴露，硬编码。 */
+export const HARD_IDLE_OFF_MS = 120_000
+
 export const DEFAULT_LED_CONFIG: LedRuntimeConfig = {
   enabled: false,
   port: 'auto',
+  master: true,
   buzzer: true,
   brightness: 160,
   attention: true,
-  idleOffMs: 120_000,
+  idleOffMs: HARD_IDLE_OFF_MS,
 }
 
 /** 合法波特率白名单（写错波特率的表现是"灯乱闪"而不是报错，所以在这里挡住）。 */
@@ -145,15 +148,24 @@ export function resolveLedConfig(configured: unknown): LedRuntimeConfig {
   const bool = (value: unknown, fallback: boolean): boolean => (typeof value === 'boolean' ? value : fallback)
   const port = typeof raw.ledPort === 'string' ? raw.ledPort.trim() : ''
   const brightness = Number(raw.ledBrightness)
-  const idleSec = Number(raw.ledIdleOffSec)
+  /**
+   * 亮度是**百分比（0..100）**，这里映射成 0..255 的通道电平。
+   * 兼容老配置：以前存的是 0..255 电平，>100 的按老语义换算成百分比，
+   * 否则用户升级后会突然变暗/变亮。
+   */
+  const brightnessLevel = (): number => {
+    if (!Number.isFinite(brightness)) return DEFAULT_LED_CONFIG.brightness
+    const pct = brightness > 100 ? Math.round((brightness / 255) * 100) : Math.trunc(brightness)
+    return Math.round((Math.min(100, Math.max(0, pct)) / 100) * 255)
+  }
   return {
     enabled: bool(raw.ledEnabled, DEFAULT_LED_CONFIG.enabled),
     port: port === '' ? DEFAULT_LED_CONFIG.port : port,
+    master: bool(raw.enabled, DEFAULT_LED_CONFIG.master),
     buzzer: bool(raw.ledBuzzer, DEFAULT_LED_CONFIG.buzzer),
-    // 显式亮度 0..254：255 是"用设备默认"的哨兵，不能让用户配置落进哨兵里
-    brightness: Number.isFinite(brightness) ? Math.min(255, Math.max(0, Math.trunc(brightness))) : DEFAULT_LED_CONFIG.brightness,
+    brightness: brightnessLevel(),
     attention: bool(raw.ledAttention, DEFAULT_LED_CONFIG.attention),
-    idleOffMs: Number.isFinite(idleSec) && idleSec >= 0 ? Math.trunc(idleSec) * 1000 : DEFAULT_LED_CONFIG.idleOffMs,
+    idleOffMs: HARD_IDLE_OFF_MS,
   }
 }
 

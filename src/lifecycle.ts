@@ -59,6 +59,12 @@ export interface WorkFacts {
   readonly pendingInbox: number
   /** 回合边界是否开着（turnBoundary 投影 openTurnStartSeq != null）。 */
   readonly openTurn: boolean
+  /**
+   * 这个会话**是否真的干过活**（宿主从 session/event 的 turn/start、tool/call 事件溯源）。
+   * 用于区分"完成"与"空闲"：空闲会话不该点亮绿灯。
+   * 靠采样猜（pending>0）会漏掉"取样间隔内就结束的快速回合"，所以必须走事件。
+   */
+  readonly everRan: boolean
   /** 正在等你回答/审批的项数（userQuestions 投影 active 项 + 悬置的审批）。 */
   readonly waitingUser: number
   /** 当前目标阶段；null = 无目标（或 goal 能力缺失）。 */
@@ -76,6 +82,7 @@ export function emptyFacts(): WorkFacts {
     pendingInbox: 0,
     openTurn: false,
     waitingUser: 0,
+  everRan: false,
     goalPhase: null,
     unfinishedTodos: 0,
   }
@@ -93,6 +100,12 @@ export interface WorkVerdict {
   readonly pending: number
   /** 在等人的项数。 */
   readonly waiting: number
+  /**
+   * 这一次的 done 是否**真的是一次完成**。
+   * 快速切换会话时，"刚切过去的空闲会话"也会被算成 done（没有未结算工作）——
+   * 那不是"完成"，不该点亮绿灯。只有**跑过活再停下来**的会话才算完成。
+   */
+  readonly completed: boolean
 }
 
 /** 单个会话的账本条目。 */
@@ -103,6 +116,8 @@ export interface WorkEntry {
   lastError: { at: number; reason: string } | null
   /** 最近一次被更新（用于清理久未出现的会话）。 */
   updatedAt: number
+  /** 是否**干过活**（跑过/等过/出过错）。没干过活的空闲会话不算"完成"。 */
+  sawWork: boolean
 }
 
 export interface LedgerOptions {
@@ -125,9 +140,16 @@ export interface WorkLedger {
   noteError(sessionId: string, reason: string, at: number): void
   /** 清掉异常（例如之后又跑成功了）。 */
   clearError(sessionId: string): void
+  /** 把所有会话的异常记录都清掉（异常画面已被"看到"并熄灯之后调用）。 */
+  clearAllErrors(): void
   /** 判定单个会话。 */
   evaluate(sessionId: string, now: number): WorkVerdict
   /** 判定所有已知会话，按"最需要你看"排序返回（error → waiting → running → done）。 */
+  /**
+   * 只保留这些会话（**以宿主为准**）：DSH 的 agents.roots() 说没有的会话，
+   * 立刻从账本里删掉，不再依赖"多久没更新"这种启发式。
+   */
+  retain(sessionIds: Iterable<string>): void
   evaluateAll(now: number): WorkVerdict[]
   /** 已知会话 id（诊断用）。 */
   sessions(): string[]
@@ -137,8 +159,15 @@ export interface WorkLedger {
   clear(): void
 }
 
-/** 阶段优先级（数字越小越"需要人"）。 */
-const PHASE_RANK: Record<WorkPhase, number> = { error: 0, waiting: 1, running: 2, done: 3 }
+/**
+ * 显示优先级（**数字越小越高**）——用户定的顺序：
+ *   报错 0 ＞ 等待 1 ＞ 完成 2 ＞ 运行中 3
+ *
+ * 语义：高优先级的灯会**打断**低优先级的灯；被打断的低优先级状态不会丢，
+ * 它留在账本里"排队"，等高优先级结束/被看到之后再显示出来。
+ * 注意 done 排在 running 之前：这样别的会话跑着的时候，某个会话完成仍能播报 2 秒。
+ */
+const PHASE_RANK: Record<WorkPhase, number> = { error: 0, waiting: 1, done: 2, running: 3 }
 
 /**
  * 建账本。所有 Map 都有上限：会话可能成百上千地开，而条目只在会话消失时才回收。
@@ -155,7 +184,7 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     const key = String(sessionId)
     let entry = entries.get(key)
     if (entry === undefined) {
-      entry = { sessionId: key, facts: emptyFacts(), lastError: null, updatedAt: at }
+      entry = { sessionId: key, facts: emptyFacts(), lastError: null, updatedAt: at, sawWork: false }
       entries.set(key, entry)
     }
     entry.updatedAt = at
@@ -178,6 +207,8 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
       (f.agentRunning ? 1 : 0) + f.liveSubagents + f.openJobs + f.pendingInbox + (f.openTurn ? 1 : 0)
     const waiting = f.waitingUser
     const freshError = entry.lastError !== null && now - entry.lastError.at <= errorTtlMs
+    // 干过活：**宿主事件说它跑过**（最可靠），或这批事实里还有活/在等/出过错
+    if (f.everRan || pending > 0 || waiting > 0 || freshError) entry.sawWork = true
 
     let phase: WorkPhase
     if (waiting > 0) {
@@ -195,8 +226,10 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
       if (f.pendingInbox > 0) reasons.push(`inbox 里还有 ${f.pendingInbox} 条待处理输入（会被再次调起）`)
       if (f.openTurn) reasons.push('回合边界仍开着')
     } else if (f.goalPhase === 'blocked') {
-      phase = 'waiting'
-      reasons.push('目标已阻塞，需要你处理')
+      // 目标 blocked = **任务阻塞**，属于"异常"（红），不是"等你"（黄）：
+      // 它需要的是"去处理"，而不是"回答模型"。
+      phase = 'error'
+      reasons.push('目标阻塞（任务被卡住，需要处理）')
     } else if (f.goalPhase === 'active') {
       // 双保险：正常路径下 active 目标会被 round-driver 再次调起，
       // 即使此刻没有任何 agent 在跑，也**不能**判成完成。
@@ -212,9 +245,11 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
 
     const key = entry.sessionId
     const prev = since.get(key)
-    const at = prev === undefined || prev.phase !== phase ? now : prev.at
+    let at = prev === undefined || prev.phase !== phase ? now : prev.at
+
     since.set(key, { phase, at })
-    return { sessionId: key, phase, reasons, since: at, pending, waiting }
+    const completed = phase !== 'done' || entry.sawWork
+    return { sessionId: key, phase, reasons, since: at, pending, waiting, completed }
   }
 
   return {
@@ -228,6 +263,7 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
         pendingInbox: nonNegative(facts.pendingInbox),
         openTurn: facts.openTurn === true,
         waitingUser: nonNegative(facts.waitingUser),
+    everRan: facts.everRan === true,
         goalPhase: normalizeGoalPhase(facts.goalPhase),
         unfinishedTodos: nonNegative(facts.unfinishedTodos),
       }
@@ -243,12 +279,26 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
       const entry = entries.get(String(sessionId))
       if (entry) entry.lastError = null
     },
+    /** 把所有会话的错误记录都清掉（错误画面已经被"看到"并熄灯之后调用）。 */
+    clearAllErrors() {
+      for (const [, entry] of entries.entries()) entry.lastError = null
+    },
     evaluate(sessionId, now) {
       const entry = entries.get(String(sessionId))
       if (entry === undefined) {
-        return { sessionId: String(sessionId), phase: 'done', reasons: ['未知会话'], since: now, pending: 0, waiting: 0 }
+        return { sessionId: String(sessionId), phase: 'done', reasons: ['未知会话'], since: now, pending: 0, waiting: 0, completed: false }
       }
       return evaluateEntry(entry, now)
+    },
+    retain(sessionIds) {
+      const keep = new Set<string>()
+      for (const id of sessionIds) keep.add(String(id))
+      for (const key of entries.keys()) {
+        if (!keep.has(key)) {
+          entries.delete(key)
+          since.delete(key)
+        }
+      }
     },
     evaluateAll(now) {
       prune(now)

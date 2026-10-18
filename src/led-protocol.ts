@@ -15,7 +15,8 @@
 //
 // ⚠️ 与上一版（自造 A5 5A + CRC8 + 语义帧）完全不同：那是"板子还没打、固件没写"时的
 // 设计稿。真固件只有这 3 条命令，**动画必须在主机渲染**成 7 颗灯的像素再推下去：
-// 26 字节/帧，30fps ≈ 780 B/s，115200 只占 ~7%。
+// 26 字节/帧；240fps 时 6240 B/s，占 115200 的 54.2%
+//（帧率与时间预算的唯一真相见 led-timing.ts，别在别处再写一套数字）。
 //
 // 本模块是纯函数（无 I/O、无定时器），主机编码与回包解析都能被单测穷举。
 
@@ -70,6 +71,14 @@ export function clampInt(value: number, lo: number, hi: number): number {
   if (n < lo) return lo
   if (n > hi) return hi
   return n
+}
+
+/**
+ * 一整帧的字节数：`55 AA` + MODE + payload + CHECKSUM + `BB` = payload + 5。
+ * LEDS 帧 = 21 + 5 = **26 字节**（串口时间预算按这个数算，见 led-timing.ts）。
+ */
+export function frameBytes(mode: number): number {
+  return 5 + (PAYLOAD_LEN[mode] ?? 0)
 }
 
 /** 累加和：从帧头 0x55 开始累加，低 8 位（不含帧尾）。 */

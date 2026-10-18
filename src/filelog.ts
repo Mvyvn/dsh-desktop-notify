@@ -51,11 +51,23 @@ export function createFileSink(options: FileSinkOptions): (line: string) => void
     try { if (existsSync(at(0))) renameSync(at(0), at(1)) } catch (e) { /* ignore */ }
   }
 
+  // ⚠️ 以前每条日志都 statSync 一次：那是**主线程同步 IO**，
+  // 插拔风暴时一秒几百条会把事件循环拖住（表现为"卡一下"）。
+  // 现在按累计字节估算大小，最多每秒 stat 一次做校准。
+  let approxBytes = 0
+  let lastStatAt = 0
   return (line: string): void => {
     try {
       ensureDir()
-      try { if (statSync(at(0)).size > maxBytes) rotate() } catch (e) { /* 首次写时文件还不存在 */ }
-      appendFileSync(at(0), line + '\n')
+      const now = Date.now()
+      if (now - lastStatAt > 1000) {
+        lastStatAt = now
+        try { approxBytes = statSync(at(0)).size } catch (e) { approxBytes = 0 }
+      }
+      if (approxBytes > maxBytes) rotate()
+      const text = line + '\n'
+      appendFileSync(at(0), text)
+      approxBytes += text.length
     } catch (e) { /* 日志失败不影响通知 */ }
   }
 }
