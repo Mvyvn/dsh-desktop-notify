@@ -38,6 +38,15 @@ export interface LinkPortInfo {
 /** 链路状态。 */
 export type LinkState = 'disabled' | 'idle' | 'opening' | 'ready' | 'error'
 
+/**
+ * 故障的**机器可读**分类（给设置页那行状态文案用）。
+ * 为什么要有它：`state === 'error'` 把两件完全不同的事混在一起 ——
+ *   · 没插设备（`no-device`）：这不是故障，是"还没接线"，界面该说"未连接"；
+ *   · 打不开/写不进（`open-failed` / `write-failed` / `read-failed`）：这才是真异常。
+ * 靠 `lastError` 的文案去猜（字符串匹配）太脆，所以给一个明确码。
+ */
+export type LinkErrorCode = '' | 'no-device' | 'open-failed' | 'write-failed' | 'read-failed'
+
 /** 重连退避档位（毫秒）。 */
 export const RECONNECT_BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10000, 30000]
 /** 心跳周期：画面没变也重发一次（固件端 3× 心跳没收到就进"失联"表现）。 */
@@ -60,6 +69,8 @@ export interface LinkStatus {
   readonly bytesSent: number
   /** 最近一次错误文本（空串 = 无错误）。 */
   readonly lastError: string
+  /** 故障分类（`''` = 无故障）。见 LinkErrorCode 的说明。 */
+  readonly errorCode: LinkErrorCode
   /** 距离下次重连还有多少毫秒（0 = 不在等待）。 */
   readonly retryInMs: number
   readonly device: DeviceInfo | null
@@ -119,6 +130,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   let nextRetryAt = 0
   let lastWriteAt = 0
   let lastError = ''
+  let lastErrorCode: LinkErrorCode = ''
   let framesSent = 0
   let bytesSent = 0
   let device: DeviceInfo | null = null
@@ -169,7 +181,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         const frame = encodeFrame(type, nextSeq(), payload)
         const written = handle.write(frame)
         if (written !== frame.length) {
-          fail(`写入不完整（${written}/${frame.length} 字节）`)
+          fail(`写入不完整（${written}/${frame.length} 字节）`, 'write-failed')
           return false
         }
         framesSent += 1
@@ -177,7 +189,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         lastWriteAt = now()
         return true
       } catch (e) {
-        fail((e as Error).message)
+        fail((e as Error).message, 'write-failed')
         return false
       }
     },
@@ -191,6 +203,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         framesSent,
         bytesSent,
         lastError,
+        errorCode: lastErrorCode,
         retryInMs: handle === null && nextRetryAt > t ? nextRetryAt - t : 0,
         device,
         parser: parser.stats,
@@ -216,14 +229,15 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     log(`[led] 串口已关闭（${why}）`)
   }
 
-  function fail(message: string): void {
+  function fail(message: string, code: LinkErrorCode = 'open-failed'): void {
     lastError = message
+    lastErrorCode = code
     state = 'error'
     closeHandle(message)
     const wait = backoff[Math.min(attempt, backoff.length - 1)] ?? 30000
     attempt += 1
     nextRetryAt = now() + wait
-    log(`[led] 串口故障：${message}；${wait}ms 后重试（第 ${attempt} 次）`)
+    log(`[led] 串口故障（${code || '-'}）：${message}；${wait}ms 后重试（第 ${attempt} 次）`)
   }
 
   async function tryOpen(t: number): Promise<void> {
@@ -234,7 +248,9 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         const ports = await options.list()
         target = pickAutoPort(ports)
         if (target === '') {
+          // 没插设备**不是故障**：给它单独的码，设置页据此说"未连接"而不是"异常"
           lastError = '没有找到任何串口设备'
+          lastErrorCode = 'no-device'
           state = 'error'
           nextRetryAt = t + 10000
           attempt += 1
@@ -248,6 +264,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       state = 'ready'
       attempt = 0
       lastError = ''
+      lastErrorCode = ''
       sentSignature = ''
       lastHeartbeatAt = 0
       parser.reset()
@@ -277,7 +294,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     try {
       chunk = handle.read(256)
     } catch (e) {
-      fail(`读取串口失败：${(e as Error).message}`)
+      fail(`读取串口失败：${(e as Error).message}`, 'read-failed')
       return
     }
     if (chunk.length === 0) return

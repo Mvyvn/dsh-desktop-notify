@@ -82,6 +82,14 @@ export interface LedStatus {
   readonly device: LinkStatus['device']
   /** 距离上次"页面聚焦"上报过了多久（-1 = 从未上报过）。 */
   readonly focusedAgoMs: number
+  /**
+   * 本机**是否存在串口设备**（枚举结果，不代表能打开）。
+   * `undefined` = 还没扫过（刚启动那几百毫秒）。
+   * 设置页据此判定「未连接」并在未连接时禁用启用开关 —— 所以**即使功能关着也要扫**。
+   */
+  readonly devicePresent: boolean | undefined
+  /** 扫到的端口名（诊断用）。 */
+  readonly ports: readonly string[]
 }
 
 export interface LedController {
@@ -252,6 +260,12 @@ export function createLedController(options: LedControllerOptions): LedControlle
 
   const keyOf = (cfg: LedRuntimeConfig): string => [cfg.attention, cfg.brightness, cfg.idleOffMs].join('|')
 
+  /** 端口枚举（链路与"有没有设备"探测共用一份实现）。 */
+  const listPorts = options.list ?? (async () => {
+    const mod = await import('./serial-port.js')
+    return mod.listSerialPorts()
+  })
+
   const link = createSerialLink({
     port: options.config().port,
     baud: options.config().baud,
@@ -259,10 +273,7 @@ export function createLedController(options: LedControllerOptions): LedControlle
       const mod = await import('./serial-port.js')
       return mod.openSerialPort(port, baud)
     }),
-    list: options.list ?? (async () => {
-      const mod = await import('./serial-port.js')
-      return mod.listSerialPorts()
-    }),
+    list: listPorts,
     now,
     log,
     onEvent: (event) => {
@@ -280,6 +291,29 @@ export function createLedController(options: LedControllerOptions): LedControlle
   let disabledLogged = false
   let lastSceneSignature = ''
   let lastVerdictCount = -1
+  /** 端口扫描结果：即使功能关着也扫 —— 设置页要靠它判「未连接」并禁用启用开关。 */
+  let devicePresent: boolean | undefined
+  let availablePorts: string[] = []
+  let lastPortScanAt = 0
+  let scanning = false
+  let noDeviceLogged = false
+  const PORT_SCAN_MS = 5000
+
+  /** 扫一次本机串口（**只枚举、不打开**，所以不占用任何资源）。 */
+  async function scanPorts(): Promise<void> {
+    if (scanning) return
+    scanning = true
+    try {
+      const list = await listPorts()
+      devicePresent = list.length > 0
+      availablePorts = list.map((p) => p.path)
+    } catch (e) {
+      // 枚举失败不动上次结论：宁可显示旧状态，也不要因为一次异常就说"没设备"
+      log(`[led] 串口枚举失败：${(e as Error).message}`)
+    } finally {
+      scanning = false
+    }
+  }
 
   function config(): LedRuntimeConfig {
     try {
@@ -301,7 +335,13 @@ export function createLedController(options: LedControllerOptions): LedControlle
   /** 一次采样：读事实 → 判定 → 画面 → 串口。 */
   function tick(): void {
     const cfg = config()
+    const at = now()
     link.configure(cfg.port, cfg.baud)          // 端口/波特率改了立刻重连
+    // 串口探测**先于**启用判定：功能关着也要知道本机有没有设备（设置页靠它判「未连接」）
+    if (lastPortScanAt === 0 || at - lastPortScanAt >= PORT_SCAN_MS) {
+      lastPortScanAt = at
+      void scanPorts()
+    }
     const key = keyOf(cfg)
     if (key !== judgeConfigKey) {
       // 判定器持有"提醒闩"状态：只在配置真的变了时重建，避免每次采样把闩清零
@@ -313,6 +353,23 @@ export function createLedController(options: LedControllerOptions): LedControlle
       })
       judgeConfigKey = key
     }
+
+    // 首次采样时"有没有设备"还没结论（枚举在路上）：先别驱动，等这次枚举回来再说。
+    // 只挡"正在枚举"这一小段；枚举**失败**时不留死锁（devicePresent 保持上次值/undefined，
+    // 下面继续走，让链路自己去试开）。
+    if (scanning) {
+      link.close()
+      return
+    }
+
+    // 没设备就等于没启用：**不驱动、也不去尝试打开串口**（用户要求"即使检测到已打开也关闭"）。
+    // 注意：这里不写回配置 —— 你的设置值原样保留，插上灯就会按它生效。
+    if (devicePresent === false) {
+      if (!noDeviceLogged) { log('[led] 未检测到串口设备：指示灯不驱动（插上后自动恢复）'); noDeviceLogged = true }
+      link.close()
+      return
+    }
+    noDeviceLogged = false
 
     if (!cfg.enabled) {
       if (!disabledLogged) { log('[led] 灯带未启用（设置页可开）'); disabledLogged = true }
@@ -338,7 +395,6 @@ export function createLedController(options: LedControllerOptions): LedControlle
     }
     warnedNoAgents = false
 
-    const at = now()
     const missing = new Set<string>()
     let roots: any[] = []
     try {
@@ -398,6 +454,7 @@ export function createLedController(options: LedControllerOptions): LedControlle
         }
       timer = schedule(() => refresh(), ms)
       log(`[led] 控制器已启动（每 ${ms}ms 采样一次）`)
+      void scanPorts()          // 立刻探一次设备：设置页首屏就能给出正确的状态词
       refresh()
     },
     stop() {
@@ -426,6 +483,8 @@ export function createLedController(options: LedControllerOptions): LedControlle
         verdicts,
         device: linkStatus.device,
         focusedAgoMs: options.lastFocusedAt() > 0 ? at - options.lastFocusedAt() : -1,
+        devicePresent,
+        ports: availablePorts,
       }
     },
     acknowledge() {

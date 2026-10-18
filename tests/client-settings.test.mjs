@@ -103,6 +103,16 @@ function createMiniReact() {
 
   return {
     React,
+    /** 调试用：当前记录到的组件实例（键=路径，值=hook 数量与首槽）。 */
+    inspect() {
+      const out = {}
+      for (const [key, inst] of instances) {
+        let first = 'undefined'
+        try { first = JSON.stringify(inst.hooks[0]) } catch (e) { first = 'circular' }
+        out[key] = { hooks: inst.count, first: first === undefined ? 'undefined' : String(first).slice(0, 90) }
+      }
+      return out
+    },
     /** 渲染一次（并在提交后同步执行 effect，模拟 React 的 commit 阶段）。 */
     render(element) {
       pending = []
@@ -140,7 +150,7 @@ function findAll(node, predicate, out = []) {
 }
 
 /** 起一个够用的浏览器环境并把 lib/client.js 跑起来，返回 Section 组件。 */
-function loadSettingsSection({ form } = {}) {
+function loadSettingsSection({ form, ledStatus } = {}) {
   const listeners = new Map()
   const add = (target) => (type, fn) => {
     const key = target + ':' + type
@@ -188,9 +198,15 @@ function loadSettingsSection({ form } = {}) {
     'window', 'document', 'fetch', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'navigator',
     CLIENT_SOURCE,
   )
+  const fetches = []
   load(
     window, document,
-    () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }),
+    (url) => {
+      fetches.push(String(url))
+      // /dnotify/led 的响应可以按用例注入（其余端点回一个空壳即可）
+      const payload = ledStatus !== undefined && String(url).indexOf('led') >= 0 ? ledStatus : { ok: true }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) })
+    },
     () => 0, () => {}, () => 0, () => {},
     { platform: 'Win32', userAgent: 'node' },
   )
@@ -224,7 +240,7 @@ function loadSettingsSection({ form } = {}) {
   const entry = registered.find((r) => r.meta && r.meta.name === 'plugins.row.config')
   assert.ok(entry, '设置页必须注册到 plugins.row.config')
   assert.ok(styles.length > 0, '设置页应当注入自己的样式')
-  return { Section: entry.component, mini, registered, document, ctx, styles, apply: exports.apply }
+  return { Section: entry.component, mini, registered, document, ctx, styles, apply: exports.apply, fetches }
 }
 
 test('护栏存在的理由：带 hooks 的组件不能被当普通函数调用', () => {
@@ -390,6 +406,82 @@ test('标准控件样式：填充式无边框（与 dsh-path-guard 同族），�
   assert.match(CLIENT_SOURCE, /\.dsh-notify-stepper\{[^}]*height:32px/)
 })
 
+test('指示灯状态：没插设备 → "未连接"（不是"异常"），且不显示"画面"', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true, ledPort: 'auto' } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const h0 = loadSettingsSection({
+    form,
+    ledStatus: {
+      ok: true, reason: 'ok',
+      link: { state: 'error', errorCode: 'no-device', lastError: '没有找到任何串口设备' },
+      scene: { state: 'running', flags: 0 },
+    },
+  })
+  const { Section, mini } = h0
+  const el = () => mini.React.createElement(Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  mini.render(el())          // 1) 配置快照还没读到
+  await flush()
+  mini.render(el())          // 2) 快照就绪 → 卡片挂载并发出第一次轮询
+  await flush()              //    等轮询的 promise 落地
+  const words = texts(mini.render(el())).join('|')   // 3) 状态已就绪
+  assert.ok(words.includes('指示灯状态：未连接'), `没插设备应是"未连接"：${words.slice(0, 200)}`)
+  assert.ok(words.includes('没有找到串口设备'), '要说明原因（短句）')
+  assert.equal(words.includes('异常'), false, '没插设备不该报成异常')
+  assert.equal(words.includes('画面：'), false, '没连上就别谈"画面"，免得让人以为灯在亮')
+})
+
+test('指示灯状态：功能没开 → "未启用"，且不显示"画面"', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: false } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const { Section, mini } = loadSettingsSection({
+    form,
+    ledStatus: { ok: true, reason: 'disabled', link: { state: 'disabled' }, scene: { state: 'off', flags: 0 } },
+  })
+  const el = () => mini.React.createElement(Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  mini.render(el())
+  await flush()
+  mini.render(el())
+  await flush()
+  const words = texts(mini.render(el())).join('|')
+  assert.ok(words.includes('指示灯状态：未启用'))
+  assert.equal(words.includes('画面：'), false, '没启用就别说画面')
+})
+
+test('指示灯状态：连上之后 → "运行中" + 端口/灯珠 + 画面', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true, ledPort: 'COM7' } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const { Section, mini } = loadSettingsSection({
+    form,
+    ledStatus: {
+      ok: true, reason: 'ok',
+      link: { state: 'ready', port: 'COM7', baud: 115200, errorCode: '' },
+      device: { leds: 60, wireVersion: 1 },
+      scene: { state: 'done', flags: 1 },
+    },
+  })
+  const el = () => mini.React.createElement(Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  mini.render(el())
+  await flush()
+  mini.render(el())
+  await flush()
+  const words = texts(mini.render(el())).join('|')
+  assert.ok(words.includes('指示灯状态：运行中'), words.slice(0, 200))
+  assert.ok(words.includes('COM7 · 60 灯珠'), '已连接时给端口与灯珠数')
+  assert.ok(words.includes('画面：已完成（提醒中）'), '已连接时才显示画面')
+})
+
 test('设置页样式表必须跟着代码更新（跨热重载的旧 CSS 不能被留在页面上）', () => {
   const form = {
     getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [] } }),
@@ -461,7 +553,7 @@ test('设置页：summary 视图与完整视图之间切换也不能改变 Secti
   assert.ok(texts(backToSummary).join('').includes('桌面通知设置'))
 })
 
-test('设置页：链路卡片首帧给"未识别"，不因为拿不到宿主状态而崩', () => {
+test('指示灯状态：首屏给"启动中"，不因为拿不到宿主状态而崩', () => {
   const form = {
     getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [] } }),
     subscribe: () => () => {},
@@ -472,9 +564,40 @@ test('设置页：链路卡片首帧给"未识别"，不因为拿不到宿主状
   const tree = mini.render(mini.React.createElement(Section, null)) // 更新渲染
   const words = texts(tree).join('|')
   assert.ok(words.includes('指示灯'), `应渲染指示灯卡片：${words.slice(0, 160)}`)
-  assert.ok(words.includes('指示灯状态：未识别'), '状态只给一个短词')
-  // 状态行里不许出现长解释（用户要求）
-  assert.equal(/指示灯状态：[^|]*(（|）|，)/.test(words), false, '状态文案不该带括号或逗号解释')
+  assert.ok(words.includes('指示灯状态：启动中'), '还没拿到宿主回包时说"启动中"')
+  // 状态词只有五个（用户指定）；不许再冒出别的词
+  for (const gone of ['未识别', '不支持']) {
+    assert.equal(words.includes(gone), false, `不该再出现「${gone}」`)
+  }
+})
+
+test('指示灯状态：没设备时"未连接"优先于"未启用"，并锁死启用开关（不会偷偷改你的配置）', async () => {
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const { Section, mini } = loadSettingsSection({
+    form,
+    // 配置里 ledEnabled=true，但本机一个串口都没有 → 必须显示"未连接"，且开关显示为关、不可点
+    ledStatus: { ok: true, reason: 'ok', devicePresent: false, ports: [], link: { state: 'disabled' }, scene: { state: 'off', flags: 0 } },
+  })
+  const el = () => mini.React.createElement(Section, null)
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  mini.render(el())
+  await flush()
+  mini.render(el())
+  await flush()
+  const tree = mini.render(el())
+  const words = texts(tree).join('|')
+  assert.ok(words.includes('指示灯状态：未连接'), `没设备应判"未连接"：${words.slice(0, 200)}`)
+  assert.equal(words.includes('指示灯状态：未启用'), false, '"未连接"优先于"未启用"')
+
+  // 启用开关：显示为关 + disabled（未连接时禁止启用）
+  const enabledSwitch = findAll(tree, (n) => n.props && n.props['data-dsh-notify-setting'] === 'ledEnabled')[0]
+  assert.ok(enabledSwitch, '应当渲染启用开关')
+  assert.equal(enabledSwitch.props['aria-checked'], 'false', '未连接时开关显示为关')
+  assert.equal(enabledSwitch.props.disabled, true, '未连接时开关不可点')
 })
 
 test('设置页：配置不可用（unavailable）时给提示而不是崩', () => {
