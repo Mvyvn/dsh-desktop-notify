@@ -2,7 +2,7 @@
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.1.0** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.1.4** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
 
 ## 依赖需求
 

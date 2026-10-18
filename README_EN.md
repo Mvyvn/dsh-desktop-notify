@@ -2,7 +2,7 @@
 
 Desktop notifications for [DSH](https://github.com/deepseek-ai/dsh) on Windows and Linux. The plugin loads automatically on every `dsh web` start — no approval step.
 
-**Version 2.1.0** · Compatible with **DSH `>=0.1.7-rc.2` and `<=0.2.0-rc.2`** (the `peerDependencies` range declared in `package.json`; other minor releases inside that range are not individually tested).
+**Version 2.1.4** · Compatible with **DSH `>=0.2.0-rc.2` and `<=0.2.1-rc.2`** (the `peerDependencies` range declared in `package.json`; other minor releases inside that range are not individually tested).
 
 ## Building from source (developer path)
 
