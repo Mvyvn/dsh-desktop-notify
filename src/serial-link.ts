@@ -176,6 +176,15 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   /** 是否有一个 open() 正在飞（防止 8ms 帧循环并发 CreateFile 同一端口）。 */
   let opening = false
   /**
+   * 打开操作的**所有权令牌**：每轮 open 领一个号。
+   *
+   * 为什么光有 `opening` 布尔不够（用户/GPT 审查指出）：打开超时后我们会把 `opening`
+   * 清掉让下一轮能跑，但**上一轮并没有被取消**——它随后失败时仍会执行 `catch { fail() }`
+   * 把新一轮刚建立的状态打掉，它的 `finally { opening = false }` 还会把新一轮的互斥解开。
+   * 有了令牌：catch 里比对代次（过期失败不触发重连），finally 只允许"当前所有者"清标记。
+   */
+  let openToken = 0
+  /**
    * 生命周期代次：每次 close/stop 递增。
    * 异步 open() 回来时要对一下代次 —— 否则"打开过程中被关掉"会把一个**已过期**的句柄
    * 装进 handle，之后的读写就打在无效句柄上（koffi 层可能直接崩进程）。
@@ -263,7 +272,8 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
           // 不兜底的话 opening 永远为 true → 再也不重试 → 灯彻底卡死。
           if (openStartedAt > 0 && t - openStartedAt > OPEN_TIMEOUT_MS) {
             opening = false
-            gen += 1            // 迟到的句柄会被代次校验丢弃并关闭
+            openToken += 1       // 让在飞的那一轮**失去所有权**：它的 finally 不能替下一轮放锁
+            gen += 1             // 迟到的句柄会被代次校验丢弃并关闭
             openStartedAt = 0
             fail('打开串口超时（设备可能已移除）', 'open-failed')
           }
@@ -322,7 +332,10 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     },
     rawFrame(frame) {
       if (handle === null || !verified) return false
-      return writeAll(frame)                        // 控制帧：必达
+      // 颜色帧（MODE.LEDS）与内部动画帧同一策略：可丢、最新画面优先。
+      // 否则外部 API（desktopNotify.led.pixels）高频调用就能绕过背压把 worker 队列灌满；
+      // 验证/蜂鸣等控制帧仍然必达。
+      return writeAll(frame, frame.length > 2 && frame[2] === MODE.LEDS)
     },
     restartFade() {
       fadeFrom = lastPixels
@@ -530,6 +543,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   async function tryOpen(t: number): Promise<void> {
     if (opening) return
     opening = true
+    const myToken = (openToken += 1)
     openStartedAt = now()
     state = 'opening'
     // 本次打开所属的代次：任何 await 回来之后都要对一次，过期就整轮作废
@@ -593,9 +607,13 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       // 立刻发验证帧：板子回 ASCII，回包到了才算连上
       writeAll(encodeVerify())
     } catch (e) {
-      fail((e as Error).message, 'open-failed')
+      // 过期尝试的失败**不能**触发 fail()：那会把新一轮刚打开/正在打开的连接打掉。
+      // （超时恢复已经给过对方一次机会并递增了代次，这里必须认代次。）
+      if (openGen === gen && myToken === openToken) fail((e as Error).message, 'open-failed')
     } finally {
-      opening = false
+      // 只有"当前所有者"才能清互斥标记：否则旧一轮的 finally 会替新一轮放锁，
+      // 让第三轮并发进来（两个 CreateFile 打同一个端口）。
+      if (myToken === openToken) { opening = false; openStartedAt = 0 }
     }
   }
 

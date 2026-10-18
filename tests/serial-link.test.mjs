@@ -412,3 +412,69 @@ test('熄灯帧走**同步写**：句柄支持 writeSync 时必须等它落地�
   assert.equal(h.link.status().state, 'ready')
 })
 
+test('打开超时后，旧一轮的**失败**不能打掉新一轮（异常路径也要认代次与所有权）', async () => {
+  const state = { now: 1000 }
+  const opens = []
+  const link = createSerialLink({
+    port: 'COM9',
+    open: () => new Promise((resolve, reject) => { opens.push({ resolve, reject }) }),
+    list: async () => [{ path: 'COM9', label: '' }],
+    now: () => state.now,
+    log: () => {},
+    backoffMs: [100],
+    verifyTimeoutMs: 1000,
+  })
+  link.tick()                       // 第一轮 A（挂起）
+  await flush()
+  assert.equal(opens.length, 1)
+
+  // ① 打开超时（>3s）：强制恢复，允许下一轮
+  state.now += 3500
+  link.tick()
+  assert.equal(link.status().state, 'error')
+  assert.match(link.status().lastError, /串口超时/)
+
+  // ② 退避到期 → 第二轮 B 开始
+  state.now += 200
+  link.tick()
+  await flush()
+  assert.equal(opens.length, 2, '应当开始第二轮打开')
+  assert.equal(link.status().state, 'opening')
+
+  // ③ A 这时才失败：绝不能触发 fail()（否则新一轮刚建立的状态就被打掉）
+  opens[0].reject(new Error('CreateFile 卡死'))
+  await flush()
+  assert.equal(link.status().state, 'opening', '旧一轮的失败不能改变新一轮的状态')
+  assert.ok(!/卡死/.test(link.status().lastError), `旧一轮的错误不该写进状态：${link.status().lastError}`)
+
+  // ④ A 的 finally 也不能替 B 放锁：此时 tick 不该并发开第三轮
+  link.tick()
+  await flush()
+  assert.equal(opens.length, 2, '旧一轮的 finally 不能清掉新一轮的 opening 标记')
+
+  // ⑤ B 正常完成：证明它没有被上一轮搅坏
+  opens[1].resolve({
+    write: (b) => b.length,
+    read: () => Buffer.from(VERIFY_REPLY, 'ascii'),
+    close: () => {},
+  })
+  await flush()
+  link.tick()
+  await flush()
+  assert.equal(link.status().state, 'ready', '新一轮应当能正常握手')
+})
+
+test('外部 API 的颜色帧同样受背压保护（不能被高频调用绕过）；控制帧仍必达', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  const colorFrame = encodeLeds(Array.from({ length: 7 }, () => ({ r: 9, g: 8, b: 7 })))
+  h.failing.busy = true
+  assert.equal(h.link.rawFrame(colorFrame), false, '积压时颜色帧应被丢弃（最新画面优先）')
+  assert.equal(h.link.status().dropped, 1)
+  assert.equal(h.link.status().state, 'ready', '丢帧不是故障')
+  // 控制帧（验证）不受背压影响
+  assert.equal(h.link.verify(), true)
+  h.failing.busy = false
+  assert.equal(h.link.rawFrame(colorFrame), true, '恢复后颜色帧照常发')
+})
+

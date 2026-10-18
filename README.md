@@ -2,16 +2,38 @@
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.1.0（分支 `feat/led-serial-ticker`）** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.1.0** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
 
-> ⚠️ 本分支**不并入主线**：它在主线通知插件之上加了一套 **USB 串口 LED 状态灯**，
-> 并把对外 API 标成特殊版本 `2.0.0-led.2`。主线行为不受影响（LED 默认关闭）。
+## 依赖需求
 
-## 串口 LED 状态灯（本分支专属）
+| 项 | 要求 |
+| --- | --- |
+| **DSH** | **`>= 0.2.0-rc.2` 且 `<= 0.2.1-rc.2`**。这段范围内本插件依赖的服务面（`connection` / `webServer` / `jobs` / `subagent` / `schedule` / `loader` / cordis）没有变化；范围外的版本不预先声称兼容 |
+| 包内声明 | `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <=0.2.1-rc.2" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合（含更新的 0.2.x） |
+| 运行时 | Windows 需要 [koffi](https://koffi.dev/)（发 WinRT Toast，已声明为普通依赖，安装时自动装好）；Linux 无额外依赖（纯 JS 直连 D-Bus） |
+| 浏览器 | Firefox / Chromium 系（Web Notification 路线依赖 Service Worker 与 `WindowClient.focus()`，见下） |
 
+## 能力
+
+- **任务完成**：agent 干完活回到空闲时，弹「✅ DSH 任务完成」+「工作区/会话名:结尾输出内容」
+- **等待你回答**：AI 发起 `ask_user_question` 提问时，弹「❓ DSH 等待你的输入」提醒你回来
+- **审批被自动拒绝**：`never` 审批政策下操作被静默拒绝时，弹「🚫 DSH 操作被自动拒绝」告知
+- **后台任务结束**：后台子代理 / 目标完成或卡住 / 后台命令任务结束时逐一提醒
+- **定时任务触发**：定时任务**真正被投递（触发）时**提醒；只创建、还没触发时不打扰
+- **启动播报**：每次 `dsh web` 启动后推一条「🚀 DSH 插件挂载成功」（正文 `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`）；有插件异常时标题改为「⚠️ DSH 插件挂载异常」、正文列出数量与 id。每次启动只推一次
+- **点击跳转**：会话类与页面类通知点击后跳回对应位置；没有跳转目标的通知点了只会消失
+- **两种通知渠道**：有在线 DSH 页面且浏览器已授权时走 **Web Notification**（点击由浏览器自己精确激活标签页，零中转页）；否则降级为**原生 Toast**（点击新开标签页跳 DSH 深链）
+- **标题一律带 `DSH` 前缀**：通知的图标与来源行由"谁发的通知"决定（Web Notification 显示浏览器身份，无法修改），所以品牌位落在标题上——每条通知标题都是「emoji + DSH + 内容」
+- **权限变更即时通知**：标题「⚠️ DSH 权限变更」，正文 `dsh-desktop-notify 跟踪到消息提醒权限变更为:xxx，插件运行模式同步变更为xxx`（`xxx` 为 `granted`/`denied`/`default` 与 `正常`/`降级`）；不受聚焦门控静默，重复回报同一状态不打扰
+- **DSH 图标**：原生 Toast 的图标与应用身份均用 DSH Logo（透明底 PNG/ICO），深浅两套按系统主题自动切换
+- **原生直连发送**：Windows 用 koffi 直调 WinRT，Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程**
+
+## 串口 LED 状态灯
+
+除桌面通知外，本插件还能驱动一块**一直亮着的状态灯**（默认关闭，不影响通知行为）。
 硬件是 **[AI Status Lights](https://github.com/Mvyvn/AI_Status_Lights)**：
 CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115200 8-N-1**）控制。
-把"AI 在干嘛"变成**一直亮着的颜色**——躺床上不用看屏幕：
+把"AI 在干嘛"变成颜色——躺床上不用看屏幕：
 **白=在跑**（彗星来回跑）、**黄=等你回话**、**绿=完成**、**红=异常**。
 
 它比系统通知多做两件事：
@@ -37,30 +59,6 @@ CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115
 
 > ⚠️ Windows 上 CH340 需要装驱动（WCH）。没装时设备管理器里是 `USB Serial` 带感叹号、
 > **不会分配 COM 口**，插件会如实显示「未连接」。
-
-## 依赖需求
-
-| 项 | 要求 |
-| --- | --- |
-| **DSH** | **`>= 0.2.0-rc.2` 且 `<= 0.2.1-rc.2`**。这段范围内本插件依赖的服务面（`connection` / `webServer` / `jobs` / `subagent` / `schedule` / `loader` / cordis）没有变化；范围外的版本不预先声称兼容 |
-| 包内声明 | `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <=0.2.1-rc.2" }`，DSH 启动时的兼容性预检会据此拦下不匹配的组合（含更新的 0.2.x） |
-| 运行时 | Windows 需要 [koffi](https://koffi.dev/)（发 WinRT Toast，已声明为普通依赖，安装时自动装好）；Linux 无额外依赖（纯 JS 直连 D-Bus） |
-| 浏览器 | Firefox / Chromium 系（Web Notification 路线依赖 Service Worker 与 `WindowClient.focus()`，见下） |
-
-## 能力
-
-- **任务完成**：agent 干完活回到空闲时，弹「✅ DSH 任务完成」+「工作区/会话名:结尾输出内容」
-- **等待你回答**：AI 发起 `ask_user_question` 提问时，弹「❓ DSH 等待你的输入」提醒你回来
-- **审批被自动拒绝**：`never` 审批政策下操作被静默拒绝时，弹「🚫 DSH 操作被自动拒绝」告知
-- **后台任务结束**：后台子代理 / 目标完成或卡住 / 后台命令任务结束时逐一提醒
-- **定时任务触发**：定时任务**真正被投递（触发）时**提醒；只创建、还没触发时不打扰
-- **启动播报**：每次 `dsh web` 启动后推一条「🚀 DSH 插件挂载成功」（正文 `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`）；有插件异常时标题改为「⚠️ DSH 插件挂载异常」、正文列出数量与 id。每次启动只推一次
-- **点击跳转**：会话类与页面类通知点击后跳回对应位置；没有跳转目标的通知点了只会消失
-- **两种通知渠道**：有在线 DSH 页面且浏览器已授权时走 **Web Notification**（点击由浏览器自己精确激活标签页，零中转页）；否则降级为**原生 Toast**（点击新开标签页跳 DSH 深链）
-- **标题一律带 `DSH` 前缀**：通知的图标与来源行由"谁发的通知"决定（Web Notification 显示浏览器身份，无法修改），所以品牌位落在标题上——每条通知标题都是「emoji + DSH + 内容」
-- **权限变更即时通知**：标题「⚠️ DSH 权限变更」，正文 `dsh-desktop-notify 跟踪到消息提醒权限变更为:xxx，插件运行模式同步变更为xxx`（`xxx` 为 `granted`/`denied`/`default` 与 `正常`/`降级`）；不受聚焦门控静默，重复回报同一状态不打扰
-- **DSH 图标**：原生 Toast 的图标与应用身份均用 DSH Logo（透明底 PNG/ICO），深浅两套按系统主题自动切换
-- **原生直连发送**：Windows 用 koffi 直调 WinRT，Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程**
 
 ## 安装
 

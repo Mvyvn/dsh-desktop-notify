@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 
 import { WRITE_DROPPED, type LinkWriteOptions } from './serial-link.js'
+import { createTxQueue } from './serial-tx.js'
 
 /** 打开并配置好的串口句柄。 */
 export interface PosixSerialHandle {
@@ -67,27 +68,18 @@ export function openPosixSerial(path: string, baud: number): PosixSerialHandle {
     }
   }
   let closed = false
-  /** 有界发送队列：队首可能是"上一帧没写完的余量"（短写）。 */
-  const queue: Buffer[] = []
-  /** 发送队列上限：4 帧 ≈ 104 字节。到上限说明设备/驱动已经卡住。 */
-  const MAX_QUEUE = 4
-
-  /** 尽力把队列推出去：短写留余量，EAGAIN（缓冲满）留到下一次。 */
-  function pump(): void {
-    while (queue.length > 0) {
-      const head = queue[0] as Buffer
-      let n = 0
-      try {
-        n = fsWriteSync(fd, head)
-      } catch (e) {
-        // EAGAIN/EWOULDBLOCK：发送缓冲满。不是错误，下次再来（不能在这里自旋：
-        // 非阻塞 fd 上重试只会立刻再抛一次，把主线程钉死）。
-        return
-      }
-      if (n <= 0) return
-      if (n >= head.length) { queue.shift(); continue }
-      queue[0] = head.subarray(n)   // 短写：把余量留在队首，别截断这一帧
-      return
+  /**
+   * 发送队列（与 Windows 共用同一套语义，见 serial-tx.ts）：
+   * 动画帧最新优先、控制帧必达 FIFO、短写留余量。**同步写也排队**——
+   * 过去它绕过队列直接写，熄灯帧可能先被接受，旧帧余量再被 close 追发上去（顺序就乱了）。
+   */
+  const tx = createTxQueue(4)
+  /** 真正写一次；EAGAIN（缓冲满）当 0 处理，交给队列下次再试。 */
+  const writeOnce = (buf: Buffer): number => {
+    try {
+      return fsWriteSync(fd, buf)
+    } catch (e) {
+      return 0
     }
   }
 
@@ -96,19 +88,16 @@ export function openPosixSerial(path: string, baud: number): PosixSerialHandle {
     baud,
     write(bytes: Buffer, options?: LinkWriteOptions): number {
       if (closed) return 0
-      if (queue.length >= MAX_QUEUE) {
-        // 队列满：动画帧可丢（链路下一次用最新画面重发），控制帧不能丢 —— 当"写失败"
-        // 处理，让链路走既有的重连路径，而不是无限堆积。
-        return options?.coalesce === true ? WRITE_DROPPED : 0
-      }
-      try { queue.push(Buffer.from(bytes)) } catch (e) { return 0 }
-      pump()
+      const result = tx.push(bytes, options?.coalesce === true)
+      if (result === 'dropped') return WRITE_DROPPED   // 动画帧被最新帧顶掉：不是故障
+      if (result === 'full') return 0                  // 真塞不下（队列里全是控制帧/半帧）
+      tx.pump(writeOnce)
       // 入队即返回整帧长度（与 win32 句柄的语义一致）；真正的完成由下一次 pump 补上。
       return bytes.length
     },
     read(max = 256): Buffer {
       if (closed) return Buffer.alloc(0)
-      pump()                        // 读之前先把上一帧没写完的余量推出去
+      tx.pump(writeOnce)              // 读之前先把没写完的余量推出去
       try {
         const buf = Buffer.alloc(max)
         const n = readSync(fd, buf, 0, max, null)
@@ -117,33 +106,38 @@ export function openPosixSerial(path: string, baud: number): PosixSerialHandle {
         return Buffer.alloc(0)   // EAGAIN：没有数据
       }
     },
-    pending(): number { return queue.length },
+    pending(): number { return tx.size },
     /**
-     * **同步**写一帧（熄灯/退出路径专用）：非阻塞 fd 上短写/EAGAIN 都要重试，
-     * 这里用有界睡眠（每次 1ms，最多 timeoutMs）把这一帧"推到底"。
+     * **同步**写一帧（熄灯/退出路径专用）：入队后按 FIFO 排空，最多等 timeoutMs。
+     *
+     * 关键是**不插队**：它和普通帧走同一条队列，所以顺序天然正确；只有"整个队列排空"
+     * 才返回整帧长度，否则返回 0（这一帧可能连一半都没出去，close 时会再尽力一次）。
      * 只保证"字节已被内核接受"，不等于 WS2812 已经刷新（协议没有逐帧回执）。
      */
     writeSync(bytes: Buffer, timeoutMs = 400): number {
       if (closed) return 0
-      pump()                       // 先把队列里的旧帧推完，别把顺序打乱
-      const deadline = Date.now() + Math.max(1, timeoutMs)
-      let off = 0
-      while (off < bytes.length) {
-        try {
-          off += fsWriteSync(fd, bytes.subarray(off))
-        } catch (e) {
-          // EAGAIN：缓冲满，等一会儿再试
-        }
-        if (off >= bytes.length) break
-        if (Date.now() >= deadline) break
-        sleepBrief(1)
-      }
-      return off
+      if (tx.push(bytes, false) !== 'ok') return 0
+      const ok = tx.drain({
+        writeOnce,
+        now: () => Date.now(),
+        deadline: Date.now() + Math.max(1, timeoutMs),
+        sleep: sleepBrief,
+      })
+      return ok ? bytes.length : 0
     },
     close(): void {
       if (closed) return
+      // 收尾：先有界地把队列排空（~20ms）—— 熄灯帧排在队尾，丢掉它 = 退出后灯还亮着
+      try {
+        tx.drain({
+          writeOnce,
+          now: () => Date.now(),
+          deadline: Date.now() + 20,
+          sleep: sleepBrief,
+        })
+      } catch (e) { /* 最后一次尽力 */ }
       closed = true
-      try { pump() } catch (e) { /* 最后一次尽力 */ }
+      tx.clear()
       try { closeSync(fd) } catch (e) { /* ignore */ }
     },
   }
