@@ -33,7 +33,10 @@ import {
 } from './protocol.js'
 import { PageRegistry } from './pages.js'
 import { planActivation } from './activation.js'
-import { Config, resolveKindSettings } from './config.js'
+import { Config, resolveKindSettings, resolveLedConfig } from './config.js'
+import { createLedController } from './led-controller.js'
+import { createLedApi, LED_API_VERSION } from './led-api.js'
+import { serialSupported } from './serial-port.js'
 import { createFileSink, logDirFor } from './filelog.js'
 import { statSync } from 'node:fs'
 import { createBoundedMap, createDeduper } from './state.js'
@@ -879,6 +882,42 @@ export function apply(ctx, config) {
     })()
   }
 
+  // ---- USB 串口 LED 状态灯（本分支专属）----
+  // 分工见 src/led-controller.ts 头部注释：判定（lifecycle）与画面（led-judge）都是纯逻辑，
+  // 这里只负责把 ctx 上的事实喂进去、把串口帧发出去。
+  // 浏览器半区上报的"最近一次聚焦时刻"是需求第 2 条（人没回来就一直提醒）的唯一输入。
+  let lastFocusedAt = 0
+  /** 该会话当前悬置的审批数（DSH 没有查询 API，只能靠 asked/decided 事件配对记账）。 */
+  const pendingApprovalCount = (sessionId) => {
+    let n = 0
+    for (const [, info] of state.asksById) {
+      if (info && String(info.sessionId || '') === String(sessionId)) n += 1
+    }
+    return n
+  }
+  let ledController = null
+  if (serialSupported()) {
+    ledController = createLedController({
+      ctx,
+      config: () => resolveLedConfig(cfgOf()),
+      log: (line) => log(line),
+      lastFocusedAt: () => lastFocusedAt,
+      pendingApprovals: (sessionId) => pendingApprovalCount(sessionId),
+    })
+  } else {
+    log(`[led] 当前平台（${process.platform}）没有串口实现，LED 状态灯不可用`)
+  }
+  /** 对外 API 的 LED 控制面（灯带功能不可用时为 null，调用方必须判空）。 */
+  const ledApi = ledController === null ? null : createLedApi({
+    enabled: () => resolveLedConfig(cfgOf()).enabled,
+    sendFrame: (type, payload) => ledController.sendFrame(type, payload),
+    acknowledge: () => ledController.acknowledge(),
+    preview: (ledState, brightness) => (brightness === undefined
+      ? ledController.preview(ledState)
+      : ledController.preview(ledState, brightness)),
+    status: () => ledController.status(),
+  })
+
   // ---- 对外 API：其它插件经 ctx.get('desktopNotify') 推送 ----
   //   push(item)       走聚焦门控（按会话）
   //   pushAlways(item) 绕过门控，始终弹
@@ -890,6 +929,8 @@ export function apply(ctx, config) {
       // 对外 API 开关（设置页）：关闭后其它插件的推送一律不入队，但仍如实返回原因
       notify: (...args) => (apiOn() ? notify(...args) : { queued: false, reason: 'api-disabled' }),
       enqueue: (item) => (apiOn() ? enqueue(item) : false),
+      // LED 控制面（本分支）：读时现问，设置页开了灯带立刻可用
+      led: () => (apiOn() ? ledApi : null),
     }))
     if (typeof disposeNotifyApi === 'function') ctx.effect(() => disposeNotifyApi)
   } catch (e) {
@@ -1261,7 +1302,42 @@ export function apply(ctx, config) {
         lastRoute,
         streams: [...openStreams.values()].map((m) => m.pageId || ''),
         gate: gate.size,
+        // ---- USB 串口 LED 状态灯（本分支）----
+        led: ledController ? ledController.status() : null,
+        ledProtocol: LED_API_VERSION,
       })
+      return
+    }
+
+    // LED 诊断/控制端点：同样用进程令牌保护（和 /status 一个级别）。
+    // 板子还没打的时候，这里就是唯一的"看不到灯也能调试"的入口：
+    //   POST /dnotify/led?t=<令牌>  { "op": "status" | "ack" | "preview", ... }
+    if (path === 'led' && (method === 'GET' || method === 'POST')) {
+      if ((url.searchParams.get('t') || '') !== CLICK_TOKEN) { res.writeHead(403); res.end('forbidden'); return }
+      if (ledController === null) { json(res, 200, { ok: false, reason: 'unsupported-platform', protocol: LED_API_VERSION }); return }
+      const body = method === 'POST' ? ((await readJsonBody(req)) || {}) : {}
+      const op = typeof body.op === 'string' ? body.op : 'status'
+      if (op === 'status') {
+        const status = ledController.status()
+        json(res, 200, {
+          ok: true, op, protocol: LED_API_VERSION, capabilities: ledApi ? ledApi.capabilities : [],
+          ...status,
+        })
+        return
+      }
+      if (op === 'ack') {
+        ledController.acknowledge()
+        json(res, 200, { ok: true, op, sceneText: ledController.status().sceneText })
+        return
+      }
+      if (op === 'preview') {
+        const state = String(body.state || '')
+        const level = body.brightness === undefined ? undefined : Number(body.brightness)
+        const ok = ledApi !== null && ledApi.preview(state, level).queued
+        json(res, ok ? 200 : 400, { ok, op, reason: ok ? '' : 'not-sent', sceneText: ledController.status().sceneText })
+        return
+      }
+      json(res, 400, { ok: false, op, reason: 'unknown-op' })
       return
     }
 
@@ -1470,8 +1546,12 @@ export function apply(ctx, config) {
         return
       }
       // 门控按"聚焦且未超时"的页面集合判定（与页面注册表互补：门控看会话，注册表看投递）
-      if (focused) gate.setPage(pageId, Date.now(), sessionId)
-      else gate.clearPage(pageId)
+      if (focused) {
+        gate.setPage(pageId, Date.now(), sessionId)
+        // LED 判断器的"人回来了"信号：**只看聚焦上报**，失焦不抹掉
+        // （需求第 2 条要的是"自上次聚焦后再未回来"，所以这里记的是最近一次回来的时刻）
+        lastFocusedAt = Date.now()
+      } else gate.clearPage(pageId)
       log(`[dsh-desktop-notify] page-focus ${pageId} seq=${seq === undefined ? '-' : seq} -> ${focused ? 'focused' : 'unfocused'} session=${sessionId || '-'} (pages=${pages.size} gate=${gate.size} ${verdict})`)
       json(res, 200, { ok: true, pages: pages.size, verdict })
       return
@@ -1616,9 +1696,11 @@ export function apply(ctx, config) {
         }
       } else if (type === 'approval/asked') {
         if (data && data.id !== undefined) {
+          // sessionId 记**根会话**：灯带按根会话判定，子代理里的审批也要算到这个会话头上
           rememberAsk(String(data.id), {
             tool: String(data.toolName || ''),
             reason: typeof data.reason === 'string' ? data.reason : '',
+            sessionId: rootSessionIdOf(session) || String((session && session.id) || ''),
           })
         }
       } else if (type === 'approval/decided') {
@@ -1630,6 +1712,8 @@ export function apply(ctx, config) {
           // 静默范围 = **被拒的那个会话本身**（子代理里被拒时，你看着母会话也要推）；
           // 点击目标才归一到母会话（子会话 id 客户端目录里没有 → 点了不跳）。
           const deniedRoot = rootSessionIdOf(session) || session
+          // 灯带：审批被拒 = 红色异常（10 分钟保鲜期内一直红，直到下一轮跑成功或人处理）
+          if (ledController) ledController.noteError(deniedRoot, `${(info as any).tool || '工具'} 操作被自动拒绝`)
           notify('🚫 DSH 操作被自动拒绝',
             withPrefix(sessionTitleText(deniedRoot), deniedRoot, ((info as any).tool || '工具') + '-' + ((info as any).reason || '操作被自动拒绝')),
             'normal', [session], { kind: 'denied', dedupeKey: 'approval:' + id, click: clickForSession(deniedRoot) })
@@ -1857,6 +1941,10 @@ export function apply(ctx, config) {
         const label = String(job.label || job.id || '后台任务')
         const status = String(job.status || '')
         const suffix = status === 'failed' ? '失败' : status === 'killed' ? '被终止' : '已完成'
+        // 灯带：后台任务失败/被终止 = 红色异常（成功结算不算异常，但也不会清掉更早的失败）
+        if (ledController && (status === 'failed' || status === 'killed') && (jobRoot || jobSession)) {
+          ledController.noteError(jobRoot || jobSession, `${label}${suffix}`)
+        }
         log(`[dsh-desktop-notify] job settled ${job.id} label=${job.label} status=${status} cause=${event.cause} owner=${jobSession || '-'} root=${jobRoot || '-'}`)
         // 去重键带 job.id：同名任务在同一窗口内结算也要各自弹（不再靠 kind 合并）
         const dedupeKey = 'job:' + String(job.id || '')
@@ -1868,6 +1956,16 @@ export function apply(ctx, config) {
       } catch (e) { /* ignore */ }
     }))
   })
+
+  // ---- 串口 LED 采样循环 ----
+  // 500ms 一次：读事实（agents/jobs/投影，全是同步查询）→ 判定 → 画面 → 串口。
+  // 只在画面签名变化时写帧，稳态下线上只有 5s 一次的心跳（见 serial-link.ts）。
+  if (ledController) {
+    ledController.start()
+    ctx.effect(() => () => {
+      try { ledController.stop() } catch (e) { /* ignore */ }
+    })
+  }
 
   // 启动播报：每次进程启动只推一次（放在最后，确保所有监听/服务都已就绪）
   reportStartupOnce()

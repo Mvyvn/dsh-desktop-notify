@@ -22,3 +22,10 @@ desktop.ini
 
 # 本地工具产物（OMB 认知层的记忆库：session.db / README.md），不进仓库
 .omb/
+
+# 固件主机侧自测的编译产物（源码与生成物 vectors.h 都进仓库，二进制不进）
+firmware/host/*.exe
+firmware/host/sim
+firmware/host/sketch_check
+*.obj
+*.o

@@ -1,8 +1,37 @@
-# DSH 桌面通知（@mvyvn/dsh-desktop-notify）
+# DSH 桌面通知（dsh-desktop-notify）
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.1.0** · 兼容 **DSH `>=0.1.7-rc.2` 且 `<=0.2.0-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.1.0-led.1（分支 `feat/led-serial-ticker`）** · 兼容 **DSH `>=0.1.7-rc.2` 且 `<=0.2.0-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+
+> ⚠️ 本分支**不并入主线**：它在主线通知插件之上加了一套 **USB 串口 LED 状态灯**，
+> 并把对外 API 标成特殊版本 `1.1.0-led.1`。主线行为不受影响（LED 默认关闭）。
+
+## 串口 LED 状态灯（本分支专属）
+
+一块 USB 转串口 + 彩色灯珠的板子，把"AI 在干嘛"变成**一直亮着的颜色**——
+躺床上不用看屏幕：**白=在跑**（左右流动）、**黄=等你回话**、**绿=完成**、**红=异常**。
+
+它比系统通知多做两件事：
+
+- **真的算"完成"**：DSH 的 `agent/status = idle` 只代表**这一轮结束**。还有子代理在跑、
+  后台任务没结算、inbox 里压着待处理输入（会被再次调起）、目标仍是 `active` 时，
+  灯**继续流动**而不是变绿（判定见 `src/lifecycle.ts`）。
+- **没看到就一直提醒**：自你上次聚焦 DSH 页面之后再没回来，画面会带呼吸 + 周期双闪，
+  **不会随时间自己安静下来**；回到页面、或在板上按键（"我知道了"）才解除
+  （判定见 `src/led-judge.ts`）。
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/serial-protocol.md`](docs/serial-protocol.md) | 帧格式、状态/效果词表、亮度与哨兵值、**对外 API（特殊版本）** |
+| [`firmware/README.md`](firmware/README.md) | 接线、烧录、先把灯点起来、**没有板子也能跑的 PC 自测** |
+
+```bash
+npm run test:firmware     # 固件核心 119 项 + Arduino 草图 17 项断言（在 PC 上真跑）
+```
+
+在设置页打开「启用串口状态灯」即可；串口留 `auto` 会自动挑 USB 串口。
+灯带卡片会实时显示链路状态（已连接 / 固件尚未握手 / 打不开串口的原因）。
 
 ## 依赖需求
 
@@ -34,7 +63,7 @@
 
 ### 方式一：按包名安装（推荐）
 
-在 DSH 的**插件管理**页选择添加插件，安装目标填包名 **`@mvyvn/dsh-desktop-notify`**（仓库：<https://github.com/Mvyvn/dsh-desktop-notify>），插件管理器会从 registry 取包、装好运行时依赖、把本包登记为 profile bundle 并启用。
+在 DSH 的**插件管理**页选择添加插件，安装目标填包名 **`dsh-desktop-notify`**（仓库：<https://github.com/Mvyvn/dsh-desktop-notify>），插件管理器会从 registry 取包、装好运行时依赖、把本包登记为 profile bundle 并启用。
 
 安装完成后**完全重启 `dsh web`**（结束进程重开，不是刷新页面），并**刷新一次 DSH 页面**。
 
@@ -84,7 +113,7 @@ npm run build        # tsc ×3 → lib/
 
 ### 逐类配置
 
-**每类推送可单独配置**（插件管理 → @mvyvn/dsh-desktop-notify 卡片 → 设置）：总开关、调试模式、对外 API 开关，以及每种通知各自的开关与**静默模式三档**：
+**每类推送可单独配置**（插件管理 → dsh-desktop-notify 卡片 → 设置）：总开关、调试模式、对外 API 开关，以及每种通知各自的开关与**静默模式三档**：
 
 | 静默模式 | 设置页显示 | 含义 |
 | --- | --- | --- |

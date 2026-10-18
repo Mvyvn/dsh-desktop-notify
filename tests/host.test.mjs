@@ -60,6 +60,30 @@ function harness(options = {}) {
     dispose.then = (onFulfilled) => { if (typeof onFulfilled === 'function') onFulfilled(dispose); return dispose }
     return dispose
   }
+  /**
+   * 周期性定时器（cordis timer 服务同时提供 ctx.timeout 与 ctx.interval，见
+   * vendor/timer/src/index.ts:15 的 mixin 列表）。LED 控制器用它在 500ms 采样一次，
+   * 所以这里必须实现成**可被 advance() 推进**的假定时器，否则那条路径测不到。
+   */
+  function interval(fn, ms) {
+    let cancelled = false
+    const schedule = () => {
+      const id = ++timerId
+      timers.set(id, {
+        at: now + ms,
+        fn: () => {
+          if (cancelled) return
+          fn()
+          if (!cancelled) schedule()
+        },
+      })
+      return id
+    }
+    schedule()
+    const dispose = () => { cancelled = true }
+    dispose.then = (onFulfilled) => { if (typeof onFulfilled === 'function') onFulfilled(dispose); return dispose }
+    return dispose
+  }
   /** 推进假定时器（含推进过程中新排的定时器），并把期间到期的都执行掉。 */
   function advance(ms) {
     const target = now + ms
@@ -126,6 +150,7 @@ function harness(options = {}) {
     on,
     effect,
     timeout,
+    interval,
     provide: (name, value) => {
       services[name] = value
       return () => { delete services[name] }
@@ -974,8 +999,8 @@ test('对外 API：push 走门控并如实返回是否入队，pushAlways 绕过
 
   // 结构化明细：被静默 / 载荷无效 都能区分
   const detail = api.notify({ title: '结构化', sessionId: 's1' })
-  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.0.0', unsupportedVersion: false })
-  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload', apiVersion: '1.0.0', unsupportedVersion: false })
+  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
+  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
 })
 
 test('jobs：kind=subagent 的 job 不再重复通知（subagent/end 已经报过）', async () => {
