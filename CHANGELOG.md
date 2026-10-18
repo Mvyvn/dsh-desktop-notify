@@ -1,5 +1,16 @@
 # Changelog
 
+## [未发布] 修复：设置卡片消失（客户端插件 id 与安装名不一致）
+
+作者在 main 上把 npm 包改名为 `@mvyvn/dsh-desktop-notify` 后，客户端 bundle 里注册的 id 也跟着
+变成了新名；但本机 profile 仍按旧名 `dsh-desktop-notify` 安装 —— DSH 加载客户端插件时会拿
+**安装名**核对 bundle 注册的 id，对不上就整块客户端半区不加载：**设置卡片消失，而通知照常**
+（通知走宿主半区），现场没有任何报错，很难排查。
+
+- 把散落在 4 处的包名收敛成一个常量 `PLUGIN_ID`（bundle id / 面板 id / 设置槽 key / `exports.name`），
+  值取**本机 profile 实际安装的名字**，并在注释里写清"改安装名时四处一起改"；
+- 新增护栏测试：四处必须同源，且注册的槽 key 必须以插件 id 开头 —— 以后再漂移会直接变红。
+
 ## [未发布] 适配真机 AI Status Lights（协议重写）
 
 板子做出来了（[AI_Status_Lights](https://github.com/Mvyvn/AI_Status_Lights)：CH32V003 + 7×WS2812B +

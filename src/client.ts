@@ -22,8 +22,23 @@
 // ⚠️ 事件监听必须用显式包装（() => report()），绝不能直接传 report：
 // DOM 监听器会被传入 Event 对象，而 !!Event === true，会把 blur/visibilitychange
 // 变成恒上报 focused=true（此前正是这个 Bug 导致失焦上报永远不生效）。
+/**
+ * **这个 id 必须与「profile 里安装的包名」逐字一致**。
+ *
+ * DSH 加载客户端插件时会拿安装名去核对 bundle 注册的 id
+ * （`packages/client/modules/src/client/system.ts`：loaded without registering "<id>"）；
+ * 对不上就整块客户端半区不加载 —— 表现是**设置卡片消失**，而通知（宿主半区）照常，
+ * 排查时非常迷惑。
+ *
+ * 为什么这里不是 `@mvyvn/dsh-desktop-notify`：本机 profile 是按旧名
+ * `dsh-desktop-notify` 装的（`~/.dsh/profiles/web/package.json` 的 link 依赖 + 软链接）。
+ * 作者在 main 上把 npm 包改成了 `@mvyvn/...`；**如果哪天把 profile 改成新名，这里跟着改**。
+ * 四处（bundle id / 面板 id / 设置槽 key / exports.name）必须同源，见测试里的护栏。
+ */
+var PLUGIN_ID = 'dsh-desktop-notify';
+
 (window as any).__ModuleLoader__.load({
-  id: '@mvyvn/dsh-desktop-notify',
+  id: PLUGIN_ID,
   factory: function (require) {
     var module = { exports: {} }
     var exports = module.exports
@@ -192,7 +207,7 @@
     function openPluginsPanel(): boolean {
       var nav = clientService('pluginNavigation')
       if (nav && typeof nav.openBundle === 'function') {
-        try { nav.openBundle('@mvyvn/dsh-desktop-notify'); blurActive(); return true } catch (e) { /* 试下一个 */ }
+        try { nav.openBundle(PLUGIN_ID); blurActive(); return true } catch (e) { /* 试下一个 */ }
       }
       var layout = clientService('layout')
       if (layout && typeof layout.selectPanel === 'function') {
@@ -954,7 +969,7 @@
     }
 
     var SETTINGS_NS = 'desktop-notify'
-    var SETTINGS_PKG = '@mvyvn/dsh-desktop-notify'
+    var SETTINGS_PKG = PLUGIN_ID
     /** 这两类通知**没有会话归属**（启动播报讲插件状态、权限变更讲浏览器权限），
      *  给它们"看着该会话时静默"是逻辑错误 —— 界面上直接显示"始终推送"。 */
     var NO_SESSION_KINDS = ['startup', 'permission']
@@ -1704,7 +1719,7 @@
       } catch (e) { /* 没有 slot 服务（旧 DSH / 非 Web）就跳过设置页 */ }
     }
 
-    ;(exports as any).name = '@mvyvn/dsh-desktop-notify'
+    ;(exports as any).name = PLUGIN_ID
     // slots/configForms/locale 是设置页要用的客户端服务；缺它们时 apply 仍会被调用，
     // installSettingsPage 里再做一次能力检查（旧 DSH 上只是没有设置页）。
     ;(exports as any).inject = ['slots', 'configForms']
