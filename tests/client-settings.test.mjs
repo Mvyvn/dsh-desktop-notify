@@ -572,7 +572,7 @@ test('插件 id 必须三处同源：bundle 注册 id / exports.name / 设置槽
   }
   const h = loadSettingsSection({ form })
   // DSH 拿「安装包名」核对 bundle 注册的 id；本机 profile 按旧名安装，源码里用 PLUGIN_ID 收敛
-  assert.equal(h.moduleId, 'dsh-desktop-notify', 'bundle id 必须等于安装名')
+  assert.equal(h.moduleId, '@mvyvn/dsh-desktop-notify', 'bundle id 必须等于安装名')
   assert.equal(h.moduleName, h.moduleId, 'exports.name 必须与 bundle id 同源')
   assert.ok(h.registered.length >= 2, '设置卡片要注册到 row 与 bundle 两处')
   for (const entry of h.registered) {
@@ -580,7 +580,7 @@ test('插件 id 必须三处同源：bundle 注册 id / exports.name / 设置槽
     assert.ok(key === h.moduleId || key.startsWith(h.moduleId + '#'), '槽 key 必须以插件 id 开头：' + key)
   }
   // 源码层面再兜一层：四处都必须走常量，不许再出现散落的包名
-  assert.match(CLIENT_SOURCE, /var PLUGIN_ID = 'dsh-desktop-notify'/)
+  assert.match(CLIENT_SOURCE, /var PLUGIN_ID = '@mvyvn\/dsh-desktop-notify'/)
   for (const site of ['id: PLUGIN_ID,', 'openBundle(PLUGIN_ID)', 'var SETTINGS_PKG = PLUGIN_ID', 'name = PLUGIN_ID']) {
     assert.ok(CLIENT_SOURCE.includes(site), '应当使用常量：' + site)
   }

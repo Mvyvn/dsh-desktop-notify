@@ -30,12 +30,12 @@
  * 对不上就整块客户端半区不加载 —— 表现是**设置卡片消失**，而通知（宿主半区）照常，
  * 排查时非常迷惑。
  *
- * 为什么这里不是 `@mvyvn/dsh-desktop-notify`：本机 profile 是按旧名
- * `dsh-desktop-notify` 装的（`~/.dsh/profiles/web/package.json` 的 link 依赖 + 软链接）。
- * 作者在 main 上把 npm 包改成了 `@mvyvn/...`；**如果哪天把 profile 改成新名，这里跟着改**。
+ * ⚠️ 还必须与 **profile 里 cordis.patch.yml 的 `name`** 一致：同一个 `id` 下若
+ * bundle patch 与 profile patch 写了不同的名字，加载器会当成**两个条目**，
+ * 同一插件的服务类型被注册两次 → `Duplicate type name` → 导入失败、阻塞 web boot。
  * 四处（bundle id / 面板 id / 设置槽 key / exports.name）必须同源，见测试里的护栏。
  */
-var PLUGIN_ID = 'dsh-desktop-notify';
+var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
 
 (window as any).__ModuleLoader__.load({
   id: PLUGIN_ID,
