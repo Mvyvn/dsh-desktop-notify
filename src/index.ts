@@ -936,7 +936,45 @@ export function apply(ctx, config) {
   }, 500)
   if (typeof (stallProbe as any).unref === 'function') (stallProbe as any).unref()
 
-  // ---- USB 串口 LED 状态灯（本分支专属）----
+  // ═══ 内存看门狗 ═══
+  // 宿主曾以 4GB 堆 OOM 崩掉（Mark-Compact 反复无效 = 有东西被**留住**，不是垃圾太多）。
+  // 堆是**整个进程**的：单看插件日志分不清是谁长起来的。这里每 10 分钟记一行
+  // 存活堆 / RSS / 本插件自己的计数 —— 下次再崩能立刻分辨"插件自己涨"还是"宿主或别的插件涨"。
+  let memLastHeapMB = 0
+  const memProbe = setInterval(() => {
+    try {
+      const m = process.memoryUsage()
+      const mb = (n: number): number => Math.round(n / 1048576)
+      const heap = mb(m.heapUsed)
+      const grew = memLastHeapMB > 0 ? heap - memLastHeapMB : 0
+      memLastHeapMB = heap
+      let extra = ''
+      try {
+        if (ledController !== null) {
+          const st = ledController.status()
+          extra = `｜LED 渲染 ${st.frames.rendered} 帧 / 推 ${st.link.framesSent} 帧 / 丢 ${st.link.dropped} 帧`
+        }
+      } catch (e) { /* 控制器没起来就算了 */ }
+      log(`[mem] 堆 ${heap}MB（+${grew}）RSS ${mb(m.rss)}MB external ${mb(m.external)}MB${extra}`)
+      if (heap > 1536 && grew > 150) {
+        log(`[mem] ⚠️ 堆增长异常：10 分钟内 +${grew}MB（已达 ${heap}MB），下次崩溃前应能在这里看到拐点`)
+      }
+    } catch (e) { /* 看门狗自己绝不抛 */ }
+  }, 600_000)
+  if (typeof (memProbe as any).unref === 'function') (memProbe as any).unref()
+
+  // ⚠️ 两个探针都必须随插件卸载清掉：
+  // 以前 stallProbe 从没被 clear 过 —— 每次热重载都多留一个 500ms 的定时器，
+  // 而且它闭包住了 `ledController`（status()/账本/串口链路），于是**旧实例永远不能回收**。
+  // 今天日志里 13 次插件加载 = 最多 12 个孤儿探针在后台空转。
+  try {
+    ctx.effect(() => () => {
+      clearInterval(stallProbe)
+      clearInterval(memProbe)
+    })
+  } catch (e) { /* 老宿主没有 effect：进程退出时定时器自然结束 */ }
+
+  // ---- USB 串口 LED 状态灯 ----
   // 分工见 src/led-controller.ts 头部注释：判定（lifecycle）与画面（led-judge）都是纯逻辑，
   /**
    * 该会话**是否真的干过活**（跑过回合 / 调用过工具）。
