@@ -773,7 +773,10 @@ export function apply(ctx, config) {
       if (port > 0) {
         const raw = ws && typeof ws.host === 'string' ? ws.host : ''
         const host = !raw || raw === '0.0.0.0' || raw === '::' ? '127.0.0.1' : raw
-        return `http://${host.includes(':') ? '[' + host + ']' : host}:${port}`
+        // 协议跟随宿主：webServer.protocol 可能是 'https:'（TLS 部署），硬编码 http:// 会拼错落地地址。
+        const protoRaw = ws && typeof ws.protocol === 'string' ? ws.protocol : 'http:'
+        const proto = protoRaw.replace(/:+$/, '') || 'http'
+        return `${proto}://${host.includes(':') ? '[' + host + ']' : host}:${port}`
       }
     } catch (e) { /* ignore */ }
     // 回退：DSH 给子进程注入的 web 地址（host 进程自己不一定有，故只作兜底）
