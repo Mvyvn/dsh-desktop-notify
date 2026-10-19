@@ -94,15 +94,15 @@ test('pushAlways 绕过门控直接入队', () => {
 test('notify 返回结构化结果：入队/静默/无效载荷', () => {
   const ok = harness()
   assert.deepEqual(ok.api.notify({ title: '正常', sessionId: 's1' }),
-    { ok: true, queued: true, silenced: false, reason: '', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
+    { ok: true, queued: true, silenced: false, reason: '', apiVersion: '1.1.0', unsupportedVersion: false })
 
   const silenced = harness({ queued: false, silenced: true, reason: 'silenced' })
   assert.deepEqual(silenced.api.notify({ title: '静默', sessionId: 's1' }),
-    { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
+    { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0', unsupportedVersion: false })
 
   const dup = harness({ queued: false, silenced: false, reason: 'duplicate' })
   assert.deepEqual(dup.api.notify({ title: '重复' }),
-    { ok: true, queued: false, silenced: false, reason: 'duplicate', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
+    { ok: true, queued: false, silenced: false, reason: 'duplicate', apiVersion: '1.1.0', unsupportedVersion: false })
 })
 
 test('标题为空或缺失时不推送', () => {
@@ -142,9 +142,9 @@ test('缺省 message 归一为空串而不是 undefined', () => {
   assert.deepEqual(queued, [{ title: '只有标题', message: '', urgency: 'normal', click: { type: 'none' } }])
 })
 
-test('对外 API v1.1.0-led.1：可探测版本与能力，未知字段忽略，更高主版本只回带标记', async () => {
+test('对外 API v1.1.0：可探测版本与能力，未知字段忽略，更高主版本只回带标记', async () => {
   const api = createNotifyApi({ notify: () => ({ queued: true }), enqueue: () => true })
-  assert.equal(api.apiVersion, '1.1.0-led.1')
+  assert.equal(api.apiVersion, '1.1.0')
   assert.ok(api.capabilities.includes('click.session'))
   assert.ok(api.capabilities.includes('click.url'))
   // 主版本仍是 1：老调用方的"更高主版本"降级判定不受本分支影响
@@ -175,15 +175,19 @@ test('LED 控制面：scene / beep / pixels / frame 都能下发，能力可探�
   const api = createNotifyApi({ notify: () => ({ queued: true }), enqueue: () => true, led: () => createLedApi(port) })
   const led = api.led
   assert.ok(led)
-  assert.equal(led.version, '2.0.0-led.2')
+  assert.equal(led.version, '1.1.0-led.3')
   assert.equal(led.leds, 7)
   assert.ok(led.capabilities.includes('led.protocol.aisl'))
   assert.ok(led.capabilities.includes('led.beep'))
+  assert.ok(led.capabilities.includes('led.scene.warn'), 'v1.1.0 新增黄灯能力')
 
   assert.equal(led.scene('done').queued, true)
   assert.deepEqual(calls.previews, [{ state: 'done', brightness: undefined }])
   assert.equal(led.scene('waiting', { brightness: 90 }).ok, true)
   assert.deepEqual(calls.previews[1], { state: 'waiting', brightness: 90 })
+  // v1.1.0 新增：黄色警告状态（旧状态名 running/waiting/done/error 完全不变）
+  assert.equal(led.scene('warn').queued, true)
+  assert.deepEqual(calls.previews[2], { state: 'warn', brightness: undefined })
 
   assert.equal(led.beep({ freqHz: 880, volume: 45, durationMs: 110 }).queued, true)
   assert.equal(calls.beeps.length, 1)

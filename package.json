@@ -1,6 +1,6 @@
 {
   "name": "@mvyvn/dsh-desktop-notify",
-  "version": "2.1.4",
+  "version": "2.4.16",
   "description": "使用系统推送 DSH 的提醒",
   "type": "module",
   "main": "lib/index.js",
@@ -17,6 +17,7 @@
     "assets/*.png",
     "assets/*.ico",
     "assets/*.js",
+    "assets/*.ps1",
     "locale/*.json",
     "assets/*.svg"
   ],

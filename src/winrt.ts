@@ -18,7 +18,9 @@
 // 跟随系统深浅色，白图标放在浅色背景上会看不见。
 
 import * as koffi from 'koffi'
-import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { clickProtocolCommand } from './activation.js'
 import { currentTheme, onThemeChange } from './theme.js'
 import { iconPathsFor, toFileUri } from './icons.js'
 import { truncateText } from './text.js'
@@ -191,10 +193,16 @@ onThemeChange(() => {
 // 的 DSH 页面（"已经开了一个标签页才发现该复用现有页面"就是这么来的）。
 //
 // 所以点击必须交给一个**浏览器之外**的入口，由宿主先决策：
-//   Toast → dsh-notify:<wire> → 隐藏的 PowerShell 一跳 → POST /dnotify/activate
+//   Toast → dsh-notify:<wire> → 隐藏的 PowerShell 一跳 → GET /dnotify/activate
 //        → 宿主：有可投递的 DSH 页面 → 走 SSE 定向投递（**一个窗口都不开**）
 //                没有页面         → 返回 {action:'open', url} → 这一跳再 Start-Process
-// 转发器只在"当前进程的 activate 地址"上工作：端口/令牌每次启动都会重写注册表命令。
+// 转发器只在"当前进程的 activate 地址"上工作：端点/令牌每次启动都会变，所以每次启动都
+// 重写注册表里的 ActivateEndpoint 等**数据值**；命令本身只引用固定路径的脚本。
+//
+// ⚠️ 为什么不再内联 `-Command` 脚本：`-Command` 会把系统传入的 %1 **拼回脚本文本**再解析，
+// 旧实现的 `$raw='%1'` 单引号字符串可被 URI 里的引号闭合 → 网页触发自定义协议就等于命令
+// 注入。现在 URI 只作为 `-File` 脚本的独立参数（$args[0]），由脚本按白名单校验后当数据用
+// （见 assets/dsh-notify-click.ps1）。
 //
 // 说明：每次点击会起一个隐藏的 PowerShell（约 0.3–0.6s，无窗口闪烁）。这是 Windows
 // 上唯一无需编译 COM 本地服务器就能"先决策后开窗口"的做法；彻底零进程需要
@@ -208,6 +216,15 @@ const SCHEME_KEY = `Software\\Classes\\${CLICK_SCHEME}`
 let activateEndpoint = ''
 /** 协议是否已成功注册（决定 Toast 用自定义协议还是浏览器兜底地址）。 */
 let schemeReady = false
+
+/** 本机转发脚本的绝对路径（lib/winrt.js → ../assets/dsh-notify-click.ps1）。 */
+function clickProtocolScriptPath(): string {
+  try {
+    return fileURLToPath(new URL('../assets/dsh-notify-click.ps1', import.meta.url))
+  } catch (e) {
+    return ''
+  }
+}
 
 /**
  * 注册/更新自定义协议指向的激活端点。
@@ -229,63 +246,47 @@ export function registerClickProtocol(endpoints: any, options: any = {}) {
     schemeReady = false
     return false
   }
+  // 脚本不在就别注册：留一个必然失败的处理器，用户看到的是"点了没反应"。
+  const scriptPath = clickProtocolScriptPath()
+  if (!scriptPath || !existsSync(scriptPath)) {
+    schemeReady = false
+    return false
+  }
   try {
     // HKCU\Software\Classes\dsh-notify（不需要管理员权限）：
     //   默认值        = 协议显示名
     //   URL Protocol  = 空值，标记"这是一个 URL 协议"
-    //   shell\open\command = 转发器命令（含 %1）
-    regAdd(SCHEME_KEY, null, `URL:${CLICK_SCHEME} Protocol`)
-    regAdd(SCHEME_KEY, 'URL Protocol', '')
-    // %1 是系统传进来的完整 URI。转发器去掉 scheme 后交给宿主：
-    //   · 决策 open       → 这一跳 Start-Process 打开（DSH 深链或外部地址）
-    //   · 决策 delivered  → 页面已经收到跳转，但浏览器窗口可能还在后台：把带 DSH 标签的
-    //                       浏览器窗口带到前台（AppActivate，无需编译 C#，约 0.2s）
-    //   · 决策 ignore     → 什么都不做
-    // ⚠️ 两条硬教训：
-    //   1) URI 拼接必须加括号：`-Uri '…' + [uri]::EscapeDataString($raw)` 在参数模式下
-    //      不会做字符串拼接，而是被当成两个位置参数（Invoke-RestMethod 直接报
-    //      "A positional parameter cannot be found"）。
-    //   2) **catch 必须做事**：早期版本 `catch{}` 把一切都吞了，任何一步出错的表现都是
-    //      "点了没反应"。现在失败会写一行日志到 %TEMP%\dsh-notify-activate.log，
-    //      并退回浏览器落地页——至少让用户看到"有个标签页开了"。
-    const command = 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command '
-      + '"$raw=\'none\';'
-      + 'Add-Content -Path (Join-Path $env:TEMP \'dsh-notify-activate.log\') -Value ((Get-Date -Format s)+\' invoked %1\') -ErrorAction SilentlyContinue;'
-      + 'try{$raw=\'%1\' -replace \'^' + CLICK_SCHEME + ':\',\'\';'
-      + `$r=Invoke-RestMethod -TimeoutSec 5 -Uri ('${activateEndpoint}&raw='+[uri]::EscapeDataString($raw));`
-      + 'if($r.action -eq \'open\' -and $r.url){Start-Process $r.url}'
-      + (focusWindow
-        // 优先标题像 DSH 的窗口；只有一个浏览器窗口时就用它；都不确定就不动（不抢焦点）
-        ? 'elseif($r.action -eq \'delivered\'){Add-Type -AssemblyName Microsoft.VisualBasic;'
-          + '$c=@(Get-Process|Where-Object{$_.MainWindowHandle -ne 0 -and $_.ProcessName -match \'chrome|msedge|firefox|brave|vivaldi|opera\'});'
-          + '$t=$c|Where-Object{$_.MainWindowTitle -match \'dsh|deepseek|harness\'}|Select-Object -First 1;'
-          + 'if(-not $t -and $c.Count -eq 1){$t=$c[0]};'
-          + 'if($t){[Microsoft.VisualBasic.Interaction]::AppActivate($t.Id)}}'
-        : '')
-      + '}catch{'
-      // 不再静默：记一行日志（便于排查），并退回浏览器落地页（至少有点反应）
-      + 'Add-Content -Path (Join-Path $env:TEMP \'dsh-notify-activate.log\') -Value ((Get-Date -Format s)+\' \'+$raw+\' \'+$_.Exception.Message) -ErrorAction SilentlyContinue;'
-      + `try{Start-Process ('${fallbackBase}'+[uri]::EscapeDataString($raw))}catch{}`
-      + '}"'
-    regAdd(`${SCHEME_KEY}\\shell\\open\\command`, null, command)
+    //   其余值        = 转发器的**数据**（端点 / 兜底地址 / 是否抢焦点），由脚本读取
+    //   shell\open\command = `powershell -File <脚本> "%1"`（URI 只出现在 %1 参数里）
+    //
+    // ⚠️ 用 koffi 直写注册表，**不再 spawn reg.exe**：旧实现每次 apply 串行 6 个
+    // `spawnSync('reg')`，在启动/热重载的同步路径上会阻塞主线程 ~0.2–0.6s。
+    const rootKey = createKey(HKEY_CURRENT_USER, SCHEME_KEY)
+    if (!rootKey) throw new Error('RegCreateKeyExW(scheme) failed')
+    try {
+      setString(rootKey, null, `URL:${CLICK_SCHEME} Protocol`)
+      setString(rootKey, 'URL Protocol', '')
+      setString(rootKey, 'ActivateEndpoint', activateEndpoint)
+      setString(rootKey, 'FallbackBase', fallbackBase)
+      setString(rootKey, 'FocusWindow', focusWindow ? '1' : '0')
+      // 自校验：写不进去（策略/权限）时不谎报成功
+      if (getString(rootKey, 'ActivateEndpoint') !== activateEndpoint) throw new Error('ActivateEndpoint read-back mismatch')
+    } finally {
+      closeKey(rootKey)
+    }
+    const cmdKey = createKey(HKEY_CURRENT_USER, `${SCHEME_KEY}\\shell\\open\\command`)
+    if (!cmdKey) throw new Error('RegCreateKeyExW(command) failed')
+    try {
+      setString(cmdKey, null, clickProtocolCommand(scriptPath))
+    } finally {
+      closeKey(cmdKey)
+    }
     schemeReady = true
     return true
   } catch (e) {
     schemeReady = false
     return false
   }
-}
-
-/**
- * 写一个注册表值（reg.exe；值名 null 表示默认值）。
- * 参数用数组直接传给 reg.exe，不经 shell，避免命令行引号地狱。
- */
-function regAdd(key, valueName, value) {
-  const args = valueName === null
-    ? ['ADD', `HKCU\\${key}`, '/ve', '/t', 'REG_SZ', '/d', value, '/f']
-    : ['ADD', `HKCU\\${key}`, '/v', valueName, '/t', 'REG_SZ', '/d', value, '/f']
-  const result = spawnSync('reg', args, { stdio: 'ignore', windowsHide: true })
-  if (result.status !== 0) throw new Error(`reg add failed: ${key}`)
 }
 
 /**
@@ -303,6 +304,31 @@ function launchFor(click) {
 /** 自定义协议是否可用（不可用时点击会退回浏览器落地页，仍可用但会新开标签页）。 */
 export function clickProtocolReady() {
   return schemeReady
+}
+
+/**
+ * 从**发送 worker** 同步"自定义协议是否可用"。
+ *
+ * 发送已搬到独立 worker 后，注册表/协议状态仍在主线程维护；worker 里的 winrt 实例
+ * 只负责 Show，不知道 `registerClickProtocol` 的结果。把结果同步过去，点击才会走
+ * `dsh-notify:`（而不是退化成浏览器落地页）。
+ */
+export function syncClickProtocol(ready) {
+  schemeReady = ready === true
+}
+
+/**
+ * 后端自检（**不弹通知**）：初始化 WinRT + 创建 notifier。
+ * 供发送 worker 启动时验证"这个线程里能不能用 WinRT"；失败则由主线程回退 inline。
+ */
+export function probeBackend() {
+  try {
+    ensureInitialized()
+    getNotifier()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, message: e && e.message ? e.message : String(e) }
+  }
 }
 
 /**

@@ -61,12 +61,21 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
     // owner.webServer 上撞注入守卫（详见 lib/index.js 的注释），那条通道挂不上；
     // 而且自带路由还能顺带承载"点击通知"的 SSE 投递。
     function post(endpoint: string, body?: unknown, keepalive?: boolean) {
-      return fetch(ROUTE_PREFIX + '/' + endpoint, {
+      var init: any = {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         keepalive: !!keepalive,   // 页面卸载期间（pagehide）也保证送达
         body: JSON.stringify(body || {}),
-      }).then(function (res) {
+      }
+      // 超时：宿主被同步 Toast 卡住 / 路由挂掉时，fetch 会一直悬挂并随每次心跳堆积。
+      // keepalive 请求不加超时（卸载期间的最后一发让它自己送完）。
+      if (!keepalive) {
+        try {
+          var AS: any = typeof AbortSignal !== 'undefined' ? AbortSignal : null
+          if (AS && typeof AS.timeout === 'function') init.signal = AS.timeout(5000)
+        } catch (e) { /* 旧浏览器不支持就算了 */ }
+      }
+      return fetch(ROUTE_PREFIX + '/' + endpoint, init).then(function (res) {
         if (!res.ok) throw new Error('dnotify ' + endpoint + ': HTTP ' + res.status)
         return res.json()
       })
@@ -233,7 +242,17 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
     function openSettingsPlugins(): boolean {
       // 深链是"刚加载完的页面"：DSH 的界面往往要几秒才挂载出来，之前 2 秒就放弃 →
       // 用户看到新 tab 开了、却停在原处。这里改成**重试到成功或超时**（10s）。
+      // 只等设置弹窗；**不**先打开插件面板（用户明确要求落点必须是设置 > 内置插件）。
+      // 轮询 100ms、入口重试 300ms：设置一出现就能立刻点，减少"弹窗已经出来但还在等"的体感延迟。
       var deadline = Date.now() + 10000
+      var started = Date.now()
+      var settled = false
+      var reportSettings = function (stage: string, result: string): void {
+        if (settled) return
+        settled = true
+        reportSw({ kind: 'settings-open', stage: stage, result: result, elapsedMs: Date.now() - started })
+      }
+      reportSw({ kind: 'settings-open', stage: 'start', result: 'opening', elapsedMs: 0 })
       var lastEntry = 0
       var lastCellClick = 0
       var done = false
@@ -247,9 +266,9 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             // 已经是当前分区就不用再点（避免连点：合成 click 会反复触发导航）
             var current = ''
             try { current = String(cell.getAttribute('aria-current') || '') } catch (e) { current = '' }
-            if (current === 'true') { done = true; clearInterval(timer); return }
+            if (current === 'true') { done = true; clearInterval(timer); reportSettings('settings-plugins', 'ok'); return }
             var now = Date.now()
-            if (now - lastCellClick >= 600) {
+            if (now - lastCellClick >= 500) {
               lastCellClick = now
               try { (cell as HTMLElement).click() } catch (e) { /* ignore */ }
               blurActive()
@@ -257,6 +276,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             if (now > deadline) {
               done = true
               clearInterval(timer)
+              reportSettings('settings-plugins', 'cell-click-timeout')
               try { console.warn('[dsh-desktop-notify] 点了「内置插件」但没等到它就位，停止尝试') } catch (e) { /* ignore */ }
             }
             return
@@ -265,6 +285,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
           if (Date.now() > deadline) {
             done = true
             clearInterval(timer)
+            reportSettings('settings-modal', 'cell-missing-timeout')
             try { console.warn('[dsh-desktop-notify] 设置已打开但没等到「内置插件」导航格，停止尝试') } catch (e) { /* ignore */ }
           }
           return
@@ -272,17 +293,22 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         if (Date.now() > deadline) {
           done = true
           clearInterval(timer)
-          try { console.warn('[dsh-desktop-notify] 没能打开设置（绝不降级到侧栏插件页）') } catch (e) { /* ignore */ }
+          reportSettings('settings-modal', 'open-timeout')
+          try { console.warn('[dsh-desktop-notify] 没能打开设置（不降级到侧栏插件页）') } catch (e) { /* ignore */ }
           return
         }
-        // 弹窗不在：最多每 600ms 试一次入口，优先级 真实设置按钮 → 账号菜单 → 合成快捷键
-        if (Date.now() - lastEntry < 600) return
+        // 弹窗不在：最多每 300ms 试一次入口，优先级 真实设置按钮 → 账号菜单 → 合成快捷键
+        if (Date.now() - lastEntry < 300) return
         lastEntry = Date.now()
         if (clickSettingsLauncher()) return
-        if (isDesktopApp()) { clickAccountMenuSettings(); return }
+        // 新版 DSH（网页端也一样）把设置放进左下角「账号菜单」；不点开它，菜单里的「设置」
+        // 项根本不存在，后面所有重试都会空转到超时 —— 这就是"不点账号菜单就卡住"的原因。
+        if (clickAccountMenuSettings()) return
+        // 桌面端快捷键由原生输入接管，合成 DOM keydown 不会触发命令：别白等两段超时。
+        if (isDesktopApp()) return
         synthesizeSettingsShortcut(true)
         setTimeout(function () { if (!settingsModal()) synthesizeSettingsShortcut(false) }, 120)
-      }, 120)
+      }, 100)
       return true
     }
     /** 点真实的「设置」入口（按 aria-label/title 精确匹配，不碰其它菜单）。 */
@@ -311,32 +337,44 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
       } catch (e) { /* ignore */ }
     }
     /**
-     * 安全地走一次"菜单 → 设置"：只考虑**看起来像账号/设置**的菜单按钮，而且必须先确认菜单里
-     * 真的有「设置」才点；没有就把菜单关掉（Esc）。绝不点 DOM 里第一个 `aria-haspopup="menu"`
-     * ——那通常是「在应用中打开」，会在屏幕上留下多余的菜单（1.6.3 及以前的实际 bug）。
+     * 安全地走一次"账号菜单 → 设置"。新版 DSH 把设置收进了左下角
+     * `button[aria-label="账号菜单"]`（aria-haspopup=menu），网页端也不再是独立的「设置」按钮；
+     * 所以必须在**所有平台**都尝试这条路径，否则会一直等到超时。
+     *
+     * 仍然只点**看起来像账号/用户菜单**的触发器，并且打开后必须确认菜单里真有「设置」；
+     * 没有就按 Esc 关掉（绝不点 DOM 里第一个 aria-haspopup=menu —— 那通常是「在应用中打开」）。
+     * @returns 是否点了账号菜单触发器（点了就由外层循环继续找「设置」项）
      */
-    function clickAccountMenuSettings() {
+    function clickAccountMenuSettings(): boolean {
       try {
         var triggers = document.querySelectorAll('button[aria-haspopup="menu"]')
         for (var i = 0; i < triggers.length; i++) {
           var trigger = triggers[i]
           var label = String(trigger.getAttribute('aria-label') || trigger.getAttribute('title') || trigger.textContent || '')
             .replace(/\s+/g, ' ').trim()
-          if (!/设置|Settings|账户|Account|用户|User|首选项|Preferences/i.test(label)) continue
+          // 新版：aria-label="账号菜单"；旧版可能有「账户/Account/用户/User」
+          if (!/账号|账户|Account|用户|User|首选项|Preferences/i.test(label)) continue
           try { (trigger as HTMLElement).click() } catch (e) { continue }
           var doc = trigger.ownerDocument
-          var item = findButton(doc, /^(设置|Settings)$/)
-          if (item) { try { (item as HTMLElement).click() } catch (e) { /* ignore */ } }
-          else {
-            // 不是设置菜单：按 Esc 关掉，别把菜单留在屏幕上
+          // 菜单项是 React 渲染的，点完触发器这一帧通常还没出现 → 给 120ms 再看；
+          // 外层循环也会继续找「设置」，这里只负责兜底和"没设置就把菜单关掉"。
+          setTimeout(function () {
+            if (!clientAlive()) return
+            if (settingsModal()) return
+            var item = findButton(doc, /^(设置|Settings|首选项|Preferences)$/)
+            if (item) {
+              try { (item as HTMLElement).click() } catch (e) { /* ignore */ }
+              return
+            }
             try {
               var Keyboard = window.KeyboardEvent || (typeof KeyboardEvent === 'function' ? KeyboardEvent : null)
               if (Keyboard) doc.dispatchEvent(new Keyboard('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
             } catch (e) { /* ignore */ }
-          }
-          return
+          }, 120)
+          return true
         }
       } catch (e) { /* ignore */ }
+      return false
     }
     /**
      * 切换会话。三态返回（旧版把"openSession 抛错"直接变成 `location.reload()`，
@@ -384,9 +422,17 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
      * 而这里只会得到 'not-found'。回报出去，宿主至少能留下可诊断的记录，
      * 不再是"点了通知什么都没发生，也没有任何痕迹"。
      */
-    function applyTargetWithRetry(target: string, openId?: string): void {
+    function applyTargetWithRetry(target: string, openId?: string, onSettled?: () => void): void {
+      var settled = false
+      var settle = function (): void {
+        if (settled) return
+        settled = true
+        if (typeof onSettled === 'function') {
+          try { onSettled() } catch (e) { /* ignore */ }
+        }
+      }
       var first = applyTarget(target)
-      if (first !== 'not-ready') { reportNavigate(openId, first); return }
+      if (first !== 'not-ready') { reportNavigate(openId, first); settle(); return }
       var attempts = 0
       var timer = setInterval(function () {
         if (!clientAlive()) { clearInterval(timer); return }
@@ -395,6 +441,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         if (result !== 'not-ready' || attempts >= NAV_RETRIES) {
           clearInterval(timer)
           if (result !== 'not-ready') reportNavigate(openId, result)
+          settle()
         }
       }, NAV_RETRY_MS)
     }
@@ -475,9 +522,18 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
     /** 插件卸载/HMR 后置 true：所有客户端定时器回调据此**立即自杀**（不依赖能否拿到 id）。 */
     var clientDisposed = false
     function clientAlive(): boolean { return !clientDisposed }
-    /** 事件驱动之外的轮询兜底周期（只在"事件丢失"时起作用，不是主路径）。 */
-    var SW_ANNOUNCE_FALLBACK_MS = 30000
     function trackTimer(id: any): any { clientTimers.push(id); return id }
+    /** 登记一个一次性定时器：触发时**自己从登记表摘掉**（否则长时间反复断线重连会线性增长）。 */
+    function trackTimeout(fn: () => void, ms: number): any {
+      var id: any = null
+      id = setTimeout(function () {
+        var at = clientTimers.indexOf(id)
+        if (at >= 0) clientTimers.splice(at, 1)
+        fn()
+      }, ms)
+      clientTimers.push(id)
+      return id
+    }
     function clearClientTimers(): void {
       for (var i = 0; i < clientTimers.length; i += 1) {
         try { clearInterval(clientTimers[i]) } catch (e) { /* ignore */ }
@@ -673,6 +729,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         perms.query({ name: 'notifications' }).then(function (status) {
           permissionStatus = status
           var fire = function () {
+            if (!clientAlive()) return
             var state = String(status.state || notifyPermission())
             reportSw({ kind: 'permission', state: state, pageId: getPageId() })
             // 恢复权限后解除"已提示过"的锁：再次掉到不可用时**必须**重新弹卡片
@@ -694,17 +751,30 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
       if (msg && msg.type === 're-announce') announceToServiceWorker(swRegistration)
     }
     var swRegisterPromise: Promise<any> | null = null
+    /** 告诉 SW：这条 dsh-navigate 已经应用完（跳转落地或重试结束），可以请求前台了。 */
+    function ackSwNavigate(nonce: string): void {
+      if (!nonce) return
+      try {
+        var sw = navigator.serviceWorker.controller || (swRegistration && swRegistration.active)
+        if (sw) sw.postMessage({ type: 'dsh-navigated', nonce: nonce })
+      } catch (e) { /* ignore */ }
+    }
     /** 接线只做一次：注册、监听、权限观察、首次回报。 */
     /** SW 让我就地跳转（通知点击）。**具名**：卸载时必须摘掉，否则 HMR 后新旧实例各执行一次。 */
     function onSwNavigate(event: any): void {
       try {
         var msg = event && event.data
         if (!msg || msg.type !== 'dsh-navigate') return
-        reportSw({ kind: 'navigate-from-sw', target: String(msg.target || '') })
-        if (msg.target) applyTargetWithRetry(String(msg.target))
+        var target = String(msg.target || '')
+        // 无目标通知不会走到这里（SW 不 postMessage）。旧 SW 若发了 none，也绝不跳转。
+        if (!target || target === 'none') return
+        var nonce = String(msg.nonce || '')
+        reportSw({ kind: 'navigate-from-sw', target: target })
+        applyTargetWithRetry(target, undefined, nonce ? function () { ackSwNavigate(nonce) } : undefined)
       } catch (e) { /* ignore */ }
     }
     function wireServiceWorker(reg: any): void {
+      if (clientDisposed) return
       swRegistration = reg
       announceToServiceWorker(reg)
       navigator.serviceWorker.addEventListener('controllerchange', onSwControllerChange)
@@ -748,16 +818,27 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
     function showNotificationFor(envelope: any): void {
       var state = notifyPermission()
       if (state !== 'granted') { ensureNotifyPermission(); showPermissionBanner() }
-      var sent = sendToServiceWorker({
+      // 无目标的 Web 通知：宿主根本不会发 target/deepLink/focusUrl，这里也不要补。
+      // 通知数据里没有动作 = 点击不会跳转、不会切标签页、不会请宿主抬窗口。
+      // 旧宿主可能仍发 target:'none'：同样在**展示前**归一化成"没有动作"。
+      var target = String(envelope.target || '')
+      var clickable = !!target && target !== 'none'
+      var deepLink = clickable ? String(envelope.deepLink || '') : ''
+      var focusUrl = clickable ? String(envelope.focusUrl || '') : ''
+      var message: any = {
         type: 'show-notification',
         title: String(envelope.title || 'DSH 通知'),
         body: String(envelope.body || '点击查看'),
         tag: String(envelope.tag || ('dsh-' + String(envelope.id || Date.now()))),
         pageId: getPageId(),
-        target: String(envelope.target || ''),
-        deepLink: String(envelope.deepLink || ''),
-      })
-      reportSw({ kind: 'show-request', sent: sent, permission: state, tag: String(envelope.tag || ''), target: String(envelope.target || '') })
+      }
+      if (clickable) {
+        message.target = target
+        message.deepLink = deepLink
+        message.focusUrl = focusUrl
+      }
+      var sent = sendToServiceWorker(message)
+      reportSw({ kind: 'show-request', sent: sent, permission: state, tag: String(envelope.tag || ''), target: target })
       if (!sent) {
         // 通知没能交给 SW（SW 还没 ready / 页面刚加载）：立刻上报失败，
         // 让宿主用原生 Toast 兜底，而不是干等满 ACK 期限。
@@ -839,11 +920,11 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         try { console.warn('[dsh-desktop-notify] 事件流断开，正在重连（浏览器通知通道会随之恢复）') } catch (e) { /* ignore */ }
       }
       var delay = Math.min(30000, 1000 * Math.pow(2, Math.min(streamReopenAttempts, 5)))
-      trackTimer(setTimeout(function () {
+      trackTimeout(function () {
         if (clientDisposed || eventStream) return
         openEventStream()
         if (!eventStream) scheduleStreamReopen()   // 仍然没建起来就继续退避重试
-      }, delay))
+      }, delay)
     }
 
     /** hash 深链（没有已打开页面时宿主 302 过来，或用户手动打开）：就地处理。 */
@@ -935,9 +1016,9 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var el: any = document.getElementById(SETTINGS_CSS_ID)
         var css = [
           '[data-dsh-notify-settings] button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}',
-          '[data-dsh-notify-menu] button[role="menuitem"]:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
-          '[data-dsh-notify-menu] button[role="menuitem"]{transition:background 120ms ease}',
-          '[data-dsh-notify-menu] button[role="menuitem"]:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none}',
+          '[data-dsh-notify-menu] button[role^="menuitem"]:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
+          '[data-dsh-notify-menu] button[role^="menuitem"]{transition:background 120ms ease}',
+          '[data-dsh-notify-menu] button[role^="menuitem"]:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none}',
 
           '@keyframes dsh-notify-menu-in{from{opacity:0;transform:translateY(-2px) scale(.98)}to{opacity:1;transform:none}}',
 
@@ -1423,9 +1504,12 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
        * ⚠️ 「没插设备」与「异常」必须分开判定：
        *   · 未连接 = 本机没有串口设备（`devicePresent === false`），或链路自己报 `no-device`；
        *   · 异常   = 真出问题（打不开/写不进/端点不可达/平台不支持/判定不了）。
+       * ⚠️ 「未启用」必须**优先**判定：用户关掉开关后，SSE 里最后一条状态可能还是
+       * link=ready（关闭瞬间的快照），只看 link 会一直显示"运行中"。所以这里同时
+       * 接受设置表单里的 `ledEnabled`（本地真相）与宿主回包的 `enabled/reason`。
        * 返回 `{ state, detail, driving, noDevice }`；`noDevice` 用于禁用「启用」开关。
        */
-      function ledStateOf(status: any): any {
+      function ledStateOf(status: any, ledEnabled: boolean | undefined): any {
         var dot = C.sub
         var state = '启动中'          // 首屏还没拿到宿主回包时，说"启动中"最诚实
         var detail = ''
@@ -1433,14 +1517,18 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var noDevice = false
         // 板子握手成功 = 检测到了这块板（含蜂鸣器）；没握手就没法确认，蜂鸣器开关灰掉
         var buzzerPresent = !!(status && status.link && status.link.verified === true)
+        // 功能关着：设置表单是本地真相（写入后立即变）；宿主回包作为无表单场景的兜底。
+        var off = ledEnabled === false ||
+          (status && status.enabled === false) ||
+          (status && status.reason === 'disabled')
         if (status && status.ok !== false && status.reason !== 'unreachable') {
           var link = status.link || {}
           noDevice = status.devicePresent === false ||
             (link.state === 'error' && link.errorCode === 'no-device')
-          if (noDevice) {
-            dot = C.sub; state = '未连接'; detail = '没有找到串口设备'
-          } else if (status.reason === 'disabled') {
+          if (off) {
             dot = C.sub; state = '未启用'
+          } else if (noDevice) {
+            dot = C.sub; state = '未连接'; detail = '没有找到串口设备'
           } else if (link.state === 'ready') {
             dot = C.ok; state = '运行中'; driving = true
             detail = (link.port || '') + (status.device ? ' · ' + status.device.leds + ' 灯珠' : '')
@@ -1468,7 +1556,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
        */
       function LedStatusCard(props: any) {
         var status = props.status
-        var view = ledStateOf(status)
+        var view = ledStateOf(status, props.enabled)
         var dot = view.dot
         var state = view.state
         return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '8px', paddingBottom: '14px' } },
@@ -1485,12 +1573,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
                   color: C.label, font: 'inherit', fontSize: '12px', padding: '2px 10px', cursor: 'pointer',
                 },
               }, '我知道了')
-              : null),
-          // 连上之后不再显示任何细节（端口/灯珠/画面都去掉）；只有**没连上**时才说明原因，
-          // 否则用户只看到一个"未连接/异常"却不知道为什么。
-          (!view.driving && view.detail)
-            ? h('span', { style: { fontSize: '12px', color: C.sub } }, view.detail)
-            : null)
+              : null))
       }
 
       /** 点击测试：选一种"动画 + 声音"，按一下推到板子上。 */
@@ -1498,9 +1581,44 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         { value: 'running', label: '模型运行中' },
         { value: 'waiting', label: '等待你' },
         { value: 'done', label: '已完成' },
+        { value: 'warn', label: '警告' },
         { value: 'error', label: '异常' },
         { value: 'selftest', label: '自检' },
       ]
+      /**
+       * 菜单的收起逻辑（两个菜单控件共用，省得改了一个忘了另一个）：
+       *   · 点菜单外面 → 收起；
+       *   · Esc       → 收起（键盘用户的退出方式，否则只能用鼠标点外面）；
+       *   · 控件被禁用 → 收起（否则留下一个点不动的浮层）。
+       * 监听只在展开期间挂着，关闭/卸载时成对摘掉。
+       */
+      function useMenuDismiss(open: boolean, setOpen: (next: boolean) => void, anchor: any, disabled: boolean): void {
+        React.useEffect(function () {
+          if (!open) return undefined
+          if (disabled) { setOpen(false); return undefined }
+          function onDoc(event: any) {
+            if (anchor.current && anchor.current.contains(event.target)) return
+            setOpen(false)
+          }
+          function onKey(event: any) {
+            if (!event || (event.key !== 'Escape' && event.key !== 'Esc')) return
+            setOpen(false)
+            // 键盘关菜单：焦点回到触发按钮，别让焦点掉到 body 上
+            try {
+              if (anchor.current && typeof anchor.current.querySelector === 'function') {
+                var trigger = anchor.current.querySelector('button')
+                if (trigger && typeof trigger.focus === 'function') trigger.focus()
+              }
+            } catch (e) { /* ignore */ }
+          }
+          document.addEventListener('mousedown', onDoc)
+          document.addEventListener('keydown', onKey)
+          return function () {
+            document.removeEventListener('mousedown', onDoc)
+            document.removeEventListener('keydown', onKey)
+          }
+        }, [open, disabled])
+      }
       /**
        * 通用菜单型选择控件 —— 与「各预设推送」那行的静默模式**同一套**：
        *   32px 无边框触发按钮（模块平台色 + 悬停底色）+ 浮层 menu + 打勾选中项。
@@ -1516,15 +1634,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var options = Array.isArray(props.options) ? props.options : []
         var current = options.filter(function (o: any) { return o.value === props.value })[0] || options[0] || { label: '' }
         var anchor = React.useRef(null)
-        React.useEffect(function () {
-          if (!open) return undefined
-          function onDoc(event: any) {
-            if (anchor.current && anchor.current.contains(event.target)) return
-            setOpen(false)
-          }
-          document.addEventListener('mousedown', onDoc)
-          return function () { document.removeEventListener('mousedown', onDoc) }
-        }, [open])
+        useMenuDismiss(open, setOpen, anchor, props.disabled === true)
         return h('div', { ref: anchor, style: { position: 'relative', flex: '0 0 auto' } },
           h('button', {
             type: 'button', disabled: props.disabled,
@@ -1552,6 +1662,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             h('path', { d: 'M4 6l4 4 4-4' }))),
           open ? h('div', {
             role: 'menu',
+            'aria-label': props.menuLabel || '选项',
             style: {
               position: 'absolute', zIndex: 100, top: 'calc(100% + 4px)', right: 0,
               boxSizing: 'border-box', width: 'max-content', minWidth: props.menuMinWidth || '132px', maxWidth: '220px',
@@ -1569,6 +1680,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             return h(MenuItem, {
               key: opt.value,
               label: opt.label,
+              value: opt.value,
               selected: opt.value === props.value,
               onClick: function () { setOpen(false); if (props.onChange) props.onChange(opt.value) },
             })
@@ -1578,27 +1690,22 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var pair = React.useState('done')
         var kind = pair[0]
         var setKind = pair[1]
-        var tip = React.useState('')
-        var tipText = tip[0]
-        var setTip = tip[1]
         var disabled = props.disabled === true
         function run() {
           if (disabled) return
-          post('led', { op: 'test', kind: kind }).then(function (res: any) {
-            setTip(res && res.ok ? '' : '未连接')
-          }, function () { setTip('未连接') })
+          // 失败不弹额外提示文字（用户要求：这一行下方不再出现任何条件提示）
+          post('led', { op: 'test', kind: kind }).catch(function () { /* 未连接/宿主不可达：静默 */ })
         }
         return h('div', { className: 'dsh-notify-row', 'data-dsh-notify-setting': 'ledTest',
           style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 0', minWidth: '0' } },
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', flex: '1 1 auto', minWidth: '90px' } },
-            h('span', { style: { fontSize: '13px', fontWeight: 500, lineHeight: '1.5', color: C.label } }, '点击测试'),
-            tipText ? h('span', { style: { fontSize: '12px', lineHeight: '1.5', color: C.tertiary } }, tipText) : null),
+            h('span', { style: { fontSize: '13px', fontWeight: 500, lineHeight: '1.5', color: C.label } }, '点击测试')),
           h('div', { style: { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '8px' } },
             // 与「各预设推送」那行同款的菜单型选择控件（不再用原生 select）
             h(SelectMenu, {
               field: 'led-test-select', options: TEST_OPTIONS, value: kind,
-              width: '120px', menuMinWidth: '132px', disabled: disabled,
-              onChange: function (v: string) { setKind(v); setTip('') },
+              width: '120px', menuMinWidth: '132px', menuLabel: '测试动画', disabled: disabled,
+              onChange: function (v: string) { setKind(v) },
             }),
             h('button', {
               type: 'button', 'data-dsh-notify-led-test': '1',
@@ -1624,8 +1731,13 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var hoverPair = React.useState(false)
         var hovered = hoverPair[0]
         var setHovered = hoverPair[1]
+        var selected = props.selected === true
         return h('button', {
-          type: 'button', role: 'menuitem',
+          type: 'button',
+          // 选择型菜单项用 menuitemradio（DSH 自己的模型选择菜单同款）：
+          // 勾号是 aria-hidden 的图标，没有 aria-checked 读屏就不知道选中了哪一项。
+          role: 'menuitemradio',
+          'aria-checked': selected ? 'true' : 'false',
           'data-dsh-notify-silence-value': props.value,
           onClick: props.onClick,
           onMouseEnter: function () { setHovered(true) },
@@ -1641,7 +1753,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
           },
         },
         h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, props.label),
-        props.selected ? h(CheckIcon, null) : null)
+        selected ? h(CheckIcon, null) : null)
       }
       function CheckIcon() {
         return h('svg', {
@@ -1652,30 +1764,25 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
       }
       /**
        * DSH 标准菜单型选择控件（照它的 DOM 结构复刻）：
-       *   触发按钮 → 展开 <div role="menu"> → 每项 <button role="menuitem">，
-       *   选中项额外给出打勾图标。样式全用主题 token（半透明浮层 + 圆角 + 阴影）。
+       *   触发按钮 → 展开 <div role="menu"> → 每项 <button role="menuitemradio">，
+       *   选中项额外给出打勾图标 + aria-checked。样式全用主题 token（半透明浮层 + 圆角 + 阴影）。
        */
       function SilenceMenu(props: any) {
-        if (props.noSession) {
-          return h('span', { style: { fontSize: '12px', color: C.sub } }, '无会话归属 · 始终推送')
-        }
         var pair = React.useState(false)
         var open = pair[0]
         var setOpen = pair[1]
         var hoverPair = React.useState(false)
         var hovered = hoverPair[0]
         var setHovered = hoverPair[1]
-        var current = SILENCE_OPTIONS.filter(function (o) { return o.value === props.value })[0] || SILENCE_OPTIONS[0]
         var anchor = React.useRef(null)
-        React.useEffect(function () {
-          if (!open) return undefined
-          function onDoc(event: any) {
-            if (anchor.current && anchor.current.contains(event.target)) return
-            setOpen(false)
-          }
-          document.addEventListener('mousedown', onDoc)
-          return function () { document.removeEventListener('mousedown', onDoc) }
-        }, [open])
+        useMenuDismiss(open, setOpen, anchor, props.disabled === true)
+        // ⚠️ 提前 return 必须放在**所有 hooks 之后**：hook 数量每次渲染必须一致，
+        // 否则（与 Section 里 TextRow/StepperRow 同一个坑）会触发 React 的
+        // "Rendered more hooks than during the previous render"，整棵设置树被打崩。
+        if (props.noSession) {
+          return h('span', { style: { fontSize: '12px', color: C.sub } }, '无会话归属 · 始终推送')
+        }
+        var current = SILENCE_OPTIONS.filter(function (o) { return o.value === props.value })[0] || SILENCE_OPTIONS[0]
         return h('div', { ref: anchor, style: { position: 'relative', flex: '0 0 auto' } },
           h('button', {
             type: 'button', disabled: props.disabled, 'aria-haspopup': 'menu', 'aria-expanded': open ? 'true' : 'false',
@@ -1699,6 +1806,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             h('path', { d: 'M4 6l4 4 4-4' }))),
           open ? h('div', {
             role: 'menu',
+            'aria-label': '静默模式',
             'data-dsh-notify-menu': '1',
             style: {
               // 右对齐锚点 + 更宽的最小宽度 ⇒ 列表比触发框**向左**多出一截
@@ -1724,18 +1832,12 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             return h(MenuItem, {
               key: opt.value,
               label: opt.label,
-              'data-dsh-notify-silence-value': opt.value,
-              onClick: function () { setOpen(false); props.onChange(opt.value) },
-              style: {
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px',
-                width: '100%', minWidth: 0, minHeight: '34px', padding: '6px 8px', border: 'none',
-                borderRadius: 'var(--dsw-radius-sm, 8px)', cursor: 'pointer', font: 'inherit',
-                fontSize: '13px', lineHeight: '20px', textAlign: 'left', whiteSpace: 'nowrap',
-                color: C.label, background: 'transparent',
-              },
-            },
-            h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, opt.label),
-            selected ? h(CheckIcon, null) : null)
+              // selected/value 必须真的传下去：MenuItem 读的是这两个 prop
+              // （缺了它们勾号永远不显示，data 属性也是 undefined）。
+              value: opt.value,
+              selected: selected,
+              onClick: function () { setOpen(false); if (props.onChange) props.onChange(opt.value) },
+            })
           })) : null)
       }
       /** 运行状态（就地计算，不必问宿主）：正常 / 降级 + 原因。 */
@@ -1753,10 +1855,6 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         // ⚠️ 这两个 hook 必须在**所有提前 return 之前**调用：它们的数量必须每次渲染一致，
         // 否则配置到位后会触发 React 的 "Rendered more hooks…"（整棵设置树被打崩）。
         var ledStatus = useLedStatus()
-        var ledView = ledStateOf(ledStatus)
-        // 「指示灯」整卡片的**唯一**不可用判据：没检测到设备。
-        // 之前每个控件各判各的（一个看枚举、一个看握手）→ 灰化不同步。
-        var ledDown = ledView.noDevice === true
         if (props && props.view === 'summary') return h('span', { style: { fontSize: '12px', color: C.sub } }, '桌面通知设置')
         if (!form) {
           // 区分"服务还没到"与"真的没有"：不再一律显示"正在读取配置…"
@@ -1773,6 +1871,12 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
         var writable = snap.writable !== false
         var types = Array.isArray(value.types) ? value.types.slice() : []
         var status = computeStatus(value)
+        // 指示灯状态词：把设置表单里的开关值一并传下去（关闭后即使宿主状态还是旧的
+        // link=ready，也必须显示「未启用」——这是用户实测的 bug）。
+        var ledView = ledStateOf(ledStatus, value.ledEnabled === true)
+        // 「指示灯」整卡片的**唯一**不可用判据：没检测到设备。
+        // 之前每个控件各判各的（一个看枚举、一个看握手）→ 灰化不同步。
+        var ledDown = ledView.noDevice === true
         function setType(kind: string, patch: any) {
           var found = false
           var next = types.map(function (row: any) {
@@ -1780,11 +1884,26 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             return row
           })
           if (!found) next.push(Object.assign({ kind: kind, enabled: true, silence: 'session' }, patch))
-          return form.set('types', next)
+          return setField('types', next)
         }
         function rowOf(kind: string) {
           for (var k = 0; k < types.length; k += 1) if (types[k] && types[k].kind === kind) return types[k]
           return { kind: kind, enabled: true, silence: 'session' }
+        }
+        /**
+         * 写配置：失败不能静默（以前返回值被直接丢掉）。
+         * cordis 会原子写回 cordis.patch.yml；只读/并发写冲突时返回 rejection，
+         * 这里至少留一条控制台记录，避免"开关看起来变了、宿主其实没变"。
+         */
+        function setField(field: string, next: any) {
+          try {
+            var out = form.set(field, next)
+            if (out && typeof out.then === 'function') {
+              out.then(null, function () { try { console.warn('[dsh-desktop-notify] 设置写入失败:', field) } catch (e) { /* ignore */ } })
+            }
+          } catch (e) {
+            try { console.warn('[dsh-desktop-notify] 设置写入失败:', field) } catch (e2) { /* ignore */ }
+          }
         }
         /** 把当前开关同步给宿主（立即生效），并顺带回读宿主的实际值。 */
         function boolRow(field: string, label: string, hint: string, current: boolean, lockedOff?: boolean) {
@@ -1795,7 +1914,7 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             key: field, label: label, hint: hint,
             switch: h(Switch, {
               field: field, label: label, checked: locked ? false : current, disabled: !writable || locked,
-              onChange: function (v: boolean) { form.set(field, v) },
+              onChange: function (v: boolean) { setField(field, v) },
             }),
           })
         }
@@ -1810,26 +1929,27 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
             h('div', { style: cardStyle },
               h(Title, null, '指示灯'),
               h('div', { className: 'dsh-notify-rows' },
-                h(LedStatusCard, { status: ledStatus }),
+                h(LedStatusCard, { status: ledStatus, enabled: value.ledEnabled === true }),
                 // **整组统一灰化**：没检测到设备时，这张卡片里所有可操作项一起灰掉。
                 // 判据只有这一个（ledDown），不再出现"一个开关看枚举、另一个看握手"导致的时间差。
                 boolRow('ledEnabled', '启用任务状态指示灯', '', value.ledEnabled === true, ledDown),
                 boolRow('ledBuzzer', '启用状态指示蜂鸣器', '', value.ledBuzzer !== false, ledDown),
-                boolRow('ledAttention', '聚焦跟踪持续提醒', '', value.ledAttention !== false, ledDown),
+                // 「聚焦跟踪持续提醒」这一行已删除：该能力改为**始终开启**（宿主侧恒 true）。
+                // config.ts 里的 ledAttention 字段保留，只为兼容已保存的旧配置。
                 // ⚠️ 必须走 h(TextRow/StepperRow, …) 而不是直接调用：那两个组件里有 hooks，
                 // 直接调用会把 hook 记到 Section 头上，而 Section 有若干提前 return 的分支
                 // （读取中/不可配置/summary）—— 配置到位后一渲染就触发 React 的
                 // "Rendered more hooks than during the previous render"，整棵设置树被打崩。
                 h(TextRow, {
                   key: 'ledPort', field: 'ledPort', label: '串口', disabled: !writable || ledDown, hintInline: true,
-                  hint: 'auto = 自动模式（USB 串口优先），也可手动填写 COM5 或 /dev/ttyUSB0 等',
+                  hint: '（默认auto = 自动模式，也可手动填写 COM 或 /dev/ttyUSB 等，可使用多个英文逗号分隔多选）',
                   value: value.ledPort === undefined ? 'auto' : value.ledPort,
-                  onChange: function (v: string) { form.set('ledPort', v) },
+                  onChange: function (v: string) { setField('ledPort', v) },
                 }),
                 h(StepperRow, {
                   key: 'ledBrightness', field: 'ledBrightness', label: '亮度（%）', disabled: !writable || ledDown,
                   step: 5, min: 0, max: 100, value: value.ledBrightness === undefined ? 65 : value.ledBrightness,
-                  onChange: function (v: number) { form.set('ledBrightness', v) },
+                  onChange: function (v: number) { setField('ledBrightness', v) },
                 }),
                 // 最下方：点击测试（选一种动画 + 声音，按一下看效果）
                 h(TestRow, { key: 'ledTest', disabled: ledDown }))),
@@ -1912,6 +2032,9 @@ var PLUGIN_ID = '@mvyvn/dsh-desktop-notify';
           // 客户端自己的定时器全部清掉（跳转重试、workspace 等待、冲突探测…），
           // 否则 HMR/卸载后旧实例还会继续跑并与新实例抢着上报/跳转。
           clearClientTimers()
+          // 权限观察的 onchange 也要摘：慢注册（register promise 晚于卸载落地）时
+          // 旧实例仍会收到权限变化并重复上报/弹卡片。
+          try { if (permissionStatus && typeof permissionStatus === 'object') permissionStatus.onchange = null } catch (e) { /* ignore */ }
           // SW 事件监听也要摘（否则 HMR 后新旧实例各报一次 register/permission）
           try { navigator.serviceWorker.removeEventListener('controllerchange', onSwControllerChange) } catch (e) { /* ignore */ }
         try { navigator.serviceWorker.removeEventListener('message', onSwNavigate) } catch (e) { /* ignore */ }

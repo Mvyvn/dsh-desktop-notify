@@ -22,6 +22,7 @@
 // （或者给固件加帧序号+确认，那是另一套协议）。
 
 import { createLedController } from '../lib/led-controller.js'
+import { createLedRuntime } from '../lib/led-runtime.js'
 import { BAUD_RATE, MODE, VERIFY_REPLY, frameBytes } from '../lib/led-protocol.js'
 import { frameBudget, frameBudgetText, monotonicNow } from '../lib/led-timing.js'
 
@@ -117,6 +118,10 @@ const controller = createLedController({
   open: async () => handle,
   list: async () => [{ path: 'COM7', label: 'probe' }],
   ...(fps > 0 ? { frameMs: 1000 / fps } : {}),
+  // 探针走 **inline 运行时**：假串口句柄没法跨线程，而 worker 里跑的是同一份
+  // led-runtime.ts —— 这里量到的节拍就是 worker 里的节拍（区别只在执行线程）。
+  // 想在真实 worker 里看帧率，用 `DSH_LED_RUNTIME` 那一套 + 真设备（/dnotify/led 的 status）。
+  runtimeFactory: (runtimeOptions) => createLedRuntime(runtimeOptions),
 })
 
 const budget = frameBudget(LEDS_BYTES, BAUD_RATE, fps > 0 ? fps : undefined)

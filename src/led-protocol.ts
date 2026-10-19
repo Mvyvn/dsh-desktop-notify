@@ -112,12 +112,40 @@ export function encodeVerify(): Buffer {
   return encodeFrame(MODE.VERIFY, [])
 }
 
+/**
+ * 7 颗灯的颜色帧，**写进预分配的 frame 缓冲**（帧循环每拍复用，不新建 Buffer/数组）。
+ *
+ * 与 `encodeLeds()` 逐字节一致（见 tests/led-render.test.mjs 对拍）；区别只在内存：
+ * 纯函数版每帧 `Buffer.allocUnsafe` + 中间 payload 数组，240fps 下就是持续的小对象分配。
+ *
+ * ⚠️ 复用前提：句柄的 `write()` 必须在返回前**自己拷走字节**（serial-win32 会拷贝到
+ * 独占 Uint8Array 再转移，serial-posix 的发送队列也用 `Buffer.from` 拷贝）。
+ * @param frame 长度必须等于 `frameBytes(MODE.LEDS)`（26 字节）
+ */
+export function encodeLedsInto(pixels: Pixels, frame: Buffer): Buffer {
+  const expected = frameBytes(MODE.LEDS)
+  if (pixels.length !== LED_COUNT) throw new Error(`需要 ${LED_COUNT} 颗灯，收到 ${pixels.length} 颗`)
+  if (frame.length !== expected) throw new Error(`LEDS 帧缓冲必须是 ${expected} 字节，收到 ${frame.length}`)
+  frame[0] = HEAD1
+  frame[1] = HEAD2
+  frame[2] = MODE.LEDS
+  for (let i = 0; i < LED_COUNT; i += 1) {
+    const px = pixels[i]
+    frame[3 + i * 3] = clampByte(px ? px.r : 0)
+    frame[4 + i * 3] = clampByte(px ? px.g : 0)
+    frame[5 + i * 3] = clampByte(px ? px.b : 0)
+  }
+  // 校验和：从帧头累加到 payload 末尾（不含帧尾）—— 与 encodeFrame 同一口径。
+  let sum = 0
+  for (let i = 0; i < expected - 2; i += 1) sum = (sum + (frame[i] ?? 0)) & 0xff
+  frame[expected - 2] = sum
+  frame[expected - 1] = TAIL
+  return frame
+}
+
 /** 7 颗灯的颜色帧（26 字节）。亮度由主机渲染时自己乘（固件没有亮度命令）。 */
 export function encodeLeds(pixels: Pixels): Buffer {
-  if (pixels.length !== LED_COUNT) throw new Error(`需要 ${LED_COUNT} 颗灯，收到 ${pixels.length} 颗`)
-  const payload: number[] = []
-  for (const px of pixels) payload.push(clampByte(px.r), clampByte(px.g), clampByte(px.b))
-  return encodeFrame(MODE.LEDS, payload)
+  return encodeLedsInto(pixels, Buffer.allocUnsafe(frameBytes(MODE.LEDS)))
 }
 
 /** 蜂鸣帧（10 字节）。 */

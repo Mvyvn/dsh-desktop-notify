@@ -13,7 +13,7 @@ import {
   FIELD, Reader, Writer, authLine, dataLine, decodeMessage, marshalMethodCall, messageLength,
   parseBusAddress, splitSignature,
 } from '../lib/dbus.js'
-import { NOTIFY_SIGNATURE, marshalNotifyBody } from '../lib/toast-linux.js'
+import { NOTIFY_SIGNATURE, marshalNotifyBody, openUriBody } from '../lib/toast-linux.js'
 
 const ICON = '/opt/dsh/assets/dsh-dark.png'
 
@@ -261,4 +261,20 @@ test('Reader：变体内层签名决定解码方式', () => {
   w.sig('v').sig('s').str('portal')
   const r = new Reader(w.buffer())
   assert.equal(r.value('v'), 'portal')
+})
+
+test('OpenURI（ssa{sv}）编组：a{sv} 长度 4 对齐、dict entry 8 对齐（Linux 点击跳转回归）', () => {
+  // 旧实现把预拼好的 options 直接 raw() 到 body 尾部：dict entry 落在 38（非 8 对齐），
+  // libdbus/GLib 会按 bad alignment 拒收 —— Linux 上点击通知永远打不开链接。
+  const url = 'https://example.com/a'
+  const token = 'dsh_notify_test'
+  const { body, lenPos, entryStart, entryLength } = openUriBody(url, token)
+  assert.equal(lenPos % 4, 0, 'a{sv} 长度字段必须 4 对齐')
+  assert.equal(entryStart % 8, 0, 'dict entry 必须 8 对齐')
+  assert.equal(body.readUInt32LE(lenPos), entryLength, '长度字段必须等于 entry 字节数')
+  const r = new Reader(body)
+  assert.equal(r.str(), '', 'parent_window 为空串')
+  assert.equal(r.str(), url)
+  assert.deepEqual(r.array('{sv}'), [['handle_token', token]])
+  assert.equal(r.offset, body.length, '解码应恰好消费完整个 body')
 })

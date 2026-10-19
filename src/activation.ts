@@ -49,3 +49,19 @@ export function planOpensWindow(plan: ActivationPlan): boolean {
 export function targetNeedsApp(target: ClickTarget): boolean {
   return needsDshPage(target)
 }
+
+/**
+ * Windows 自定义协议处理器的注册命令（纯字符串，无平台依赖）。
+ *
+ * 为什么放在这里：winrt.ts 顶层就 `koffi.load('combase.dll')`，非 Windows 平台无法 import，
+ * 而这条命令的**形状**本身就是安全边界——系统传入的 URI 只能作为 "%1" 这个独立参数交给
+ * `-File`，绝不能进入脚本文本。放在纯模块里，Linux CI 也能直接断言它。
+ *
+ * 为什么不能用 `-Command`：`-Command` 会把后面的参数**拼回脚本文本**再解析，于是
+ * `$raw='%1'` 里的单引号可以被 URI 里的引号闭合，网页触发的自定义协议就变成了命令注入。
+ * `-File` 把参数按 argv 交给脚本（`$args[0]`），URI 始终只是数据。
+ */
+export function clickProtocolCommand(scriptPath: string): string {
+  return 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass'
+    + ` -File "${scriptPath}" "%1"`
+}

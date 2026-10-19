@@ -50,6 +50,7 @@ function createPage(options = {}) {
     documentButtons: options.documentButtons || [],
     eventSource: null,
     keyboardEvents: [],
+    swMessages: [],
   }
   let timerId = 0
   let now = 0
@@ -65,6 +66,28 @@ function createPage(options = {}) {
   }
   const dispatch = (target, type) => {
     for (const fn of [...(listeners.get(target + ':' + type) || [])]) fn({ type })
+  }
+
+  // 可选的假 Service Worker：只用于"SW → 页面 dsh-navigate"这条链路。
+  // 不开启时保持原样（现有测试不依赖 SW）。
+  const swListeners = new Map()
+  const swRegistration = {
+    active: { postMessage: (msg) => { state.swMessages.push(msg) } },
+    installing: null,
+    waiting: null,
+  }
+  const serviceWorker = {
+    addEventListener(type, fn) {
+      if (!swListeners.has(type)) swListeners.set(type, new Set())
+      swListeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) { const set = swListeners.get(type); if (set) set.delete(fn) },
+    register: () => Promise.resolve(swRegistration),
+    ready: Promise.resolve(swRegistration),
+    controller: swRegistration.active,
+  }
+  const dispatchSwMessage = (data) => {
+    for (const fn of [...(swListeners.get('message') || [])]) fn({ data })
   }
 
   const window = {
@@ -194,7 +217,11 @@ function createPage(options = {}) {
       })
     },
     setTimeoutFake, clearTimer, setIntervalFake, clearTimer,
-    { platform: options.platform || 'Win32', userAgent: 'node' },
+    {
+      platform: options.platform || 'Win32',
+      userAgent: 'node',
+      ...(options.serviceWorker ? { serviceWorker } : {}),
+    },
   )
   const exports = registration.factory(() => { throw new Error('client.js 不该 require 任何模块') })
 
@@ -216,6 +243,7 @@ function createPage(options = {}) {
   return {
     ctx, exports, fetches, listeners, injects, disposers, sessionsState, subscribers,
     services, window, document, dispatch, state, opened,
+    dispatchSwMessage,
     get hash() { return state.hash },
     setFocused: (v) => { state.focused = v },
     setVisible: (v) => { state.visible = v },
@@ -362,6 +390,33 @@ test('点击投递：SSE 收到 navigate 后认领并执行跳转', async () => 
   assert.equal(claimBody.openId, 'op-1', '认领必须带上事件里的 openId（否则两次点击会串单）')
   assert.ok(claimBody.pageId, '认领要带 pageId')
   assert.deepEqual(page.opened, ['s-target'], '认领成功后切到该会话')
+})
+
+test('SW 点击：页面只负责跳转，不再代发前台请求', async () => {
+  const page = createPage({ serviceWorker: true, pluginNavigation: {} })
+  page.exports.apply(page.ctx)
+  await tick()
+  await tick()
+  const focusUrl = 'http://127.0.0.1:3080/dnotify/focus?t=test-token'
+  page.dispatchSwMessage({ type: 'dsh-navigate', target: 'page:plugins', focusUrl })
+  await tick()
+  assert.deepEqual(page.opened, ['panel:@mvyvn/dsh-desktop-notify'], '跳转立即执行')
+  page.advance(2000)
+  await tick()
+  assert.equal(page.fetches.some((f) => f.url === focusUrl), false, '前台请求由 SW 直接发，页面不再参与')
+})
+
+test('SW 点击 target:none（旧 SW 兜底）：页面不跳转、不请求前台', async () => {
+  const page = createPage({ serviceWorker: true, pluginNavigation: {} })
+  page.exports.apply(page.ctx)
+  await tick()
+  await tick()
+  const focusUrl = 'http://127.0.0.1:3080/dnotify/focus?t=old'
+  page.dispatchSwMessage({ type: 'dsh-navigate', target: 'none', focusUrl })
+  page.advance(2000)
+  await tick()
+  assert.deepEqual(page.opened, [])
+  assert.equal(page.fetches.some((f) => f.url === focusUrl), false)
 })
 
 test('点击投递：认领失败（别的页面先拿到/已过期）时本页什么都不做', async () => {

@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  LED_FRAME_MS, LED_TARGET_FPS, MAX_TARGET_FPS, clampFrameMs,
+  LED_FRAME_MS, LED_IDLE_FRAME_MS, LED_TARGET_FPS, MAX_TARGET_FPS, clampFrameMs,
   frameBudget, frameBudgetText, minWriteGapMs, monotonicNow, wireTimeMs,
 } from '../lib/led-timing.js'
 import { BAUD_RATE, MODE, frameBytes } from '../lib/led-protocol.js'
@@ -56,4 +56,15 @@ test('单调时钟：只增不减（不随系统校时回退）', () => {
   const b = monotonicNow()
   assert.ok(Number.isFinite(a) && Number.isFinite(b))
   assert.ok(b >= a, `单调时钟回退：${a} → ${b}`)
+})
+
+test('空闲节拍 200~250ms：明显慢于动画节拍，但快于心跳（不会被空闲节拍拖慢）', () => {
+  // 帧循环按需运行：连续动画 240fps，稳态（off / done）降到这个周期。
+  // 它必须比 HEARTBEAT_MS（1000ms，serial-link）快 —— 否则心跳、看门狗、验证帧都会被拖慢。
+  assert.ok(Number.isFinite(LED_IDLE_FRAME_MS), '空闲节拍必须是有限数')
+  assert.ok(LED_IDLE_FRAME_MS >= 200 && LED_IDLE_FRAME_MS <= 250,
+    `空闲节拍必须在 200~250ms（实际 ${LED_IDLE_FRAME_MS}ms）`)
+  assert.ok(LED_IDLE_FRAME_MS >= LED_FRAME_MS * 40,
+    `空闲节拍要明显慢于动画（${LED_FRAME_MS}ms），实际 ${LED_IDLE_FRAME_MS}ms`)
+  assert.ok(LED_IDLE_FRAME_MS < 1000, '必须快于 1s 心跳')
 })

@@ -11,12 +11,13 @@
 // 用法：npm run check
 import { readdirSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const libDir = join(root, 'lib')
 const scriptsDir = join(root, 'scripts')
+const assetsDir = join(root, 'assets')
 
 let failed = 0
 
@@ -36,13 +37,20 @@ for (const name of files) {
   if (result.status !== 0) failed += 1
 }
 
-// 2) scripts/*.ps1 必须是 UTF-8 BOM（否则 PowerShell 5.1 下中文乱码 → 解析失败）
-const ps1Files = readdirSync(scriptsDir).filter((name) => name.endsWith('.ps1')).sort()
-for (const name of ps1Files) {
-  const bytes = readFileSync(join(scriptsDir, name)).subarray(0, 3)
+// 2) scripts/*.ps1 与 assets/*.ps1 必须是 UTF-8 BOM（否则 PowerShell 5.1 下中文乱码 → 解析失败）
+//    assets/dsh-notify-click.ps1 是 `dsh-notify:` 自定义协议的本机转发器（Windows 点击链路），
+//    同样由 Windows PowerShell 5.1 读取，所以 BOM 规则必须覆盖到 assets/。
+const ps1Files = []
+for (const dir of [scriptsDir, assetsDir]) {
+  for (const name of readdirSync(dir).filter((n) => n.endsWith('.ps1')).sort()) {
+    ps1Files.push({ dir, name })
+  }
+}
+for (const { dir, name } of ps1Files) {
+  const bytes = readFileSync(join(dir, name)).subarray(0, 3)
   const hasBom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
   if (!hasBom) {
-    console.error(`[dsh-desktop-notify] scripts/${name} 缺少 UTF-8 BOM：`
+    console.error(`[dsh-desktop-notify] ${basename(dir)}/${name} 缺少 UTF-8 BOM：`
       + 'Windows PowerShell 5.1 会按 ANSI 解码中文，脚本会直接解析失败')
     failed += 1
   }

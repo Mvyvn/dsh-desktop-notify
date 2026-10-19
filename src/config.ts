@@ -178,7 +178,8 @@ export function resolveKindSettings(configured: unknown): Record<string, { enabl
       if (!row || typeof row !== 'object') continue
       const entry = row as { kind?: unknown; enabled?: unknown; silence?: unknown }
       const kind = typeof entry.kind === 'string' ? entry.kind : ''
-      if (!kind || !(kind in out)) continue
+      // hasOwn 而不是 `in`：'__proto__'/'constructor' 会命中原型链，写进 out 会污染原型。
+      if (!kind || !Object.prototype.hasOwnProperty.call(out, kind)) continue
       out[kind] = {
         enabled: entry.enabled === undefined ? out[kind].enabled : entry.enabled === true,
         silence: SILENCE_MODES.includes(entry.silence as SilenceMode)

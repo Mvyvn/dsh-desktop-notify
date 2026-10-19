@@ -23,6 +23,8 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise<T>((resolve) => {
     let settled = false
     const timer = setTimeout(() => { if (!settled) { settled = true; resolve(fallback) } }, ms)
+    // 超时兜底定时器不能把宿主/测试进程钉住：后端卡死时最多等 ms，不延长进程寿命。
+    if (typeof (timer as any).unref === 'function') (timer as any).unref()
     p.then(
       (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v) } },
       () => { if (!settled) { settled = true; clearTimeout(timer); resolve(fallback) } },

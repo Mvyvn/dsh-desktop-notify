@@ -13,11 +13,11 @@
 // 写失败、半包回包、握手超时、设备中途掉线、端口从 auto 变成 COM5……
 
 import {
-  BAUD_RATE, LED_COUNT, createReplyScanner, encodeBuzzer, encodeLeds, encodeVerify, frameBytes,
+  BAUD_RATE, LED_COUNT, createReplyScanner, encodeBuzzer, encodeLeds, encodeLedsInto, encodeVerify, frameBytes,
   pixelsEqual, type Beep, type Pixels, type ReplyScannerStats, MODE,
 } from './led-protocol.js'
-import { blendPixels, ditherPixels, renderPixels, smootherstep } from './led-render.js'
-import { OFF_SCENE, type LedScene } from './led-scene.js'
+import { createPixelFrame, renderPixels, smootherstep } from './led-render.js'
+import { OFF_SCENE, SCENE_FLAG, sceneVisualKey, type LedScene } from './led-scene.js'
 import { minWriteGapMs, monotonicNow } from './led-timing.js'
 
 /** 重连退避档位（毫秒）。 */
@@ -26,6 +26,31 @@ export const RECONNECT_BACKOFF_MS: readonly number[] = [300, 1000, 2000, 5000, 1
 export const HEARTBEAT_MS = 1000   // 1s：断线后 ~1s 内就能从写失败发现
 /** 握手超时：打开后这么久没等到验证回包就判"这不是本板子"。 */
 export const VERIFY_TIMEOUT_MS = 1500
+
+/**
+ * 链路质量（自适应冗余的判据，不参与线协议）。
+ *   · ok      —— 窗口内没有劣化信号；
+ *   · suspect —— 有可恢复的劣化（丢帧/单次写失败/一次重连）：开始**每帧双发**；
+ *   · bad     —— 已确认异常（探测回包超时 / 连续写失败 / 短时间多次重连）。
+ */
+export type LinkQuality = 'ok' | 'suspect' | 'bad'
+
+/** 质量信号窗口：窗口内没有新信号，质量才算恢复（与冗余保持同窗）。 */
+export const QUALITY_WINDOW_MS = 10_000
+/** 劣化后冗余保持时长：这段时间内每帧双发；之后再没新信号就自动退出。 */
+export const REDUNDANCY_HOLD_MS = 10_000
+/** 冗余期间的主动探测频率（用空闲带宽换"设备还在"的确定性）。 */
+export const PROBE_EVERY_DEGRADED_MS = 800
+/** 冗余期间的探测容忍时间（正常回包几十毫秒；再慢就当掉线）。 */
+export const PROBE_TIMEOUT_DEGRADED_MS = 400
+/** 窗口内丢帧达到这个数 → suspect（偶发单帧是正常抖动）。 */
+const DROPPED_SUSPECT = 2
+/** 窗口内写失败达到这个数 → bad。 */
+const WRITE_FAIL_BAD = 2
+/** 窗口内重连达到这个数 → bad。 */
+const RECONNECT_BAD = 2
+/** 两次故障间隔小于这个值 = "重复失败"（确认不是瞬时抖动）→ 允许发黑帧。 */
+const FAIL_CONFIRM_MS = 5000
 
 /**
  * `write()` 的返回：**丢弃**（不是故障）。
@@ -109,6 +134,16 @@ export interface LinkStatus {
   readonly scene: string
   /** 最近一帧像素（诊断/UI 预览用）。 */
   readonly pixels: Pixels
+  /**
+   * 链路质量（自适应冗余判据；见 {@link LinkQuality}）。
+   * 可选字段：旧调用方/替身不提供时按 'ok' 处理。
+   */
+  readonly quality?: LinkQuality
+  /**
+   * 是否处于**自适应冗余**：劣化后 10s 内每帧双发 + 快速健康探针。
+   * 可选字段：旧调用方/替身不提供时按 false 处理。
+   */
+  readonly redundancy?: boolean
 }
 
 export interface SerialLinkOptions {
@@ -124,6 +159,14 @@ export interface SerialLinkOptions {
   readonly heartbeatMs?: number
   readonly backoffMs?: readonly number[]
   readonly verifyTimeoutMs?: number
+  /** 健康期主动探测周期（默认 2500ms；劣化期自动提到 800ms）。 */
+  readonly probeEveryMs?: number
+  /** 健康期探测容忍时间（默认 1200ms；劣化期自动降到 400ms）。 */
+  readonly probeTimeoutMs?: number
+  /** 劣化期（自适应冗余）的探测周期（默认 800ms）。 */
+  readonly probeEveryDegradedMs?: number
+  /** 劣化期（自适应冗余）的探测容忍时间（默认 400ms）。 */
+  readonly probeTimeoutDegradedMs?: number
 }
 
 export interface SerialLink {
@@ -132,6 +175,14 @@ export interface SerialLink {
   applyScene(scene: LedScene): void
   /** 由宿主定时器驱动：连接管理 + 握手 + 渲染 + 收发。 */
   tick(): void
+  /**
+   * 这一层此刻是否**需要连续帧**（控制器按需调度用）。
+   *
+   * opening/verifying（握手/重连）、交叉渐变窗口、覆盖动画，以及 running/waiting/error
+   * 这类连续动画画面 → true；稳态（off / done）→ false（靠心跳 + 主动探测就够）。
+   * 可选：实现方（多灯扇出层）没有这个方法时，控制器会退回保守判据（握手状态 + 画面状态）。
+   */
+  needsFrames?(): boolean
   /** 立刻响一声（不经过判定；诊断/联调用）。 */
   beep(beep: Beep): boolean
   /** 原样写一帧（已经编码好的；对外 API 的 raw 出口用）。 */
@@ -173,6 +224,30 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   /** 上次枚举时刻（枚举节流：≥5 秒一次；它不是状态源，只是兜底发现）。 */
   let lastEnumerateAt = 0
   const ENUMERATE_EVERY_MS = 5000
+  /**
+   * 自动发现：**候选轮转**（对齐参考上位机 `ail_link.find_device`）。
+   *
+   * 参考实现是"列出所有串口 → 逐个发验证帧 → 谁应答谁就是板子"；我们过去只挑**一个**
+   * 候选硬试，一旦选错（比如把手机当成灯，日志里的"串口 COM19 没有回应验证帧"）
+   * 就会一直重试那个口，永远轮不到真正的板子。现在：
+   *   一轮里每个口试一次（0.8s 握手窗口）→ 失败的口冷却 30s → 成功即记住 lastGoodPort。
+   */
+  let candidateQueue: string[] = []
+  /** 枚举结果缓存（候选轮转期间复用；避免每 250ms 就枚举一次）。 */
+  let knownPorts: LinkPortInfo[] = []
+  /** 被拒绝（无应答 / 打不开）的端口 → 冷却截止时刻。 */
+  const rejectedUntil = new Map<string, number>()
+  const REJECT_COOLDOWN_MS = 30_000
+  /** 候选口的握手窗口（参考上位机每口 0.3s、最多 3 次；这里 0.8s 内发两次验证帧）。 */
+  const PROBE_HANDSHAKE_MS = 800
+  /** 换下一个候选的间隔：多口机器上不能走指数退避（会把发现拖到 10s+）。 */
+  const CANDIDATE_RETRY_MS = 250
+  /** 本次打开是"探测候选"还是"直连已知口"：决定握手窗口与失败处理。 */
+  let probingNow = false
+  /** 这次打开已经发了几次验证帧（固件偶尔丢帧）。 */
+  let verifySends = 0
+  /** 握手截止时刻。 */
+  let verifyDeadlineAt = 0
   /** 是否有一个 open() 正在飞（防止 8ms 帧循环并发 CreateFile 同一端口）。 */
   let opening = false
   /**
@@ -207,15 +282,45 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   let scene: LedScene = OFF_SCENE
   let lastPixels: Pixels = []
   let lastSentAt = 0
-  let sentPixels: Pixels = []
+  /**
+   * 已写入串口那一帧的**快照**（去重基准），以及"有没有发过帧"。
+   *
+   * 不能直接记 `pixels` 引用：像素缓冲现在是复用的（下一帧就地改写），
+   * 引用一存就会变成"自己和自己比"—— 去重永远命中、画面再也不更新。
+   */
+  let hasSent = false
+  const sentFrame = createPixelFrame()
+  /** 常规画面渲染目标（复用，不再每帧新建 7 个像素对象）。 */
+  const renderFrame = createPixelFrame()
+  /** 渐变/抖动的工作缓冲（复用）。 */
+  const outFrame = createPixelFrame()
+  /** 渐变起点的快照（复用；渐变的 300ms 里每帧都要读它）。 */
+  const fadeFrame = createPixelFrame()
+  /** 编码目标（复用 26 字节；句柄 write() 会拷走字节，见 encodeLedsInto 注释）。 */
+  const ledsFrame = Buffer.allocUnsafe(frameBytes(MODE.LEDS))
   /** 看门狗阈值：握手后这么久没成功写出一个字节，就认为设备已经没了。 */
   const STALE_MS = 3000
-  /** 主动探测周期：定期发验证帧，收不到回包才算真的断了。 */
-  const PROBE_EVERY_MS = 2500
-  /** 探测容忍时间（板子回 21 字节 ASCII，正常几十毫秒）。 */
-  const PROBE_TIMEOUT_MS = 1200
+  /** 健康期主动探测周期：定期发验证帧，收不到回包才算真的断了。 */
+  const probeEveryBase = Math.max(200, Math.trunc(options.probeEveryMs ?? 2500) || 2500)
+  /** 健康期探测容忍时间（板子回 21 字节 ASCII，正常几十毫秒）。 */
+  const probeTimeoutBase = Math.max(100, Math.trunc(options.probeTimeoutMs ?? 1200) || 1200)
+  /** 劣化期（冗余）的探测节奏：用空闲带宽换"设备还在"的确定性。 */
+  const probeEveryDegraded = Math.max(100, Math.trunc(options.probeEveryDegradedMs ?? PROBE_EVERY_DEGRADED_MS) || PROBE_EVERY_DEGRADED_MS)
+  const probeTimeoutDegraded = Math.max(100, Math.trunc(options.probeTimeoutDegradedMs ?? PROBE_TIMEOUT_DEGRADED_MS) || PROBE_TIMEOUT_DEGRADED_MS)
   let lastProbeAt = 0
   let probeSentAt = 0
+  /** 自适应冗余：截止时刻（劣化信号会把它一再往后推，健康后自动到期）。 */
+  let redundancyUntil = 0
+  /** 上一次"已连接状态下"的故障时刻（判断"重复失败"→ 才允许发黑帧）。 */
+  let lastFailAt = 0
+  /** 连续写失败计数（成功后清零；用于把"瞬时一次"与"持续写不出去"分开）。 */
+  let consecutiveWriteFails = 0
+  /** 质量信号窗口起点与窗口内计数（见 QUALITY_WINDOW_MS）。 */
+  let qualityWindowAt = 0
+  let winDropped = 0
+  let winWriteFail = 0
+  let winProbeTimeout = 0
+  let winReconnect = 0
   /** 交叉渐变的起点（'' = 无渐变）。 */
   let fadeFrom: Pixels = []
   let fadeStart = 0
@@ -252,10 +357,16 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     applyScene(next) {
       // 画面一变就记下"从哪淡入"：240Hz 下这 300ms 的交叉渐变看起来才是连续的，
       // 否则白→绿是硬切（用户明确要"曲速渐变"）。
-      const nextSig = `${next.state}|${next.flags}`
-      const prevSig = `${scene.state}|${scene.flags}`
-      if (nextSig !== prevSig) {
-        fadeFrom = lastPixels.length > 0 ? lastPixels : []
+      //
+      // ⚠️ 判据必须是**会改变像素**的键（sceneVisualKey），不能用完整 flags：
+      // 切标签页/切应用会让页面聚焦状态翻转 → judge 给 running 画面打/去 MUTED 标记。
+      // MUTED 在 running/done/error 的渲染里根本不参与（只影响 waiting 的呼吸），
+      // 旧实现却把它当新画面：重置 sceneSince（彗星回到起点、逐灯 stagger 重新展开）
+      // 再叠 250ms 渐变 → 用户看到"切一次标签页就闪一次、连续切就严重闪烁"。
+      if (sceneVisualKey(next) !== sceneVisualKey(scene)) {
+        // 快照：像素缓冲会被下一帧就地改写，渐变起点必须拷进独立缓冲
+        if (lastPixels.length > 0) fadeFrame.copyFrom(lastPixels)
+        fadeFrom = lastPixels.length > 0 ? fadeFrame.pixels : []
         fadeStart = now()
         sceneSince = now()
       }
@@ -286,44 +397,69 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       if (!verified) {
         drainReplies()
         if (verified) return
-        if (t - openedAt >= verifyTimeoutMs) {
-          fail(`串口 ${openedFor} 没有回应验证帧（可能不是 AI Status Lights）`, 'verify-timeout')
+        // 固件偶尔丢一帧：截止前再补发一次验证帧（参考上位机默认重试 3 次）
+        if (verifySends < 2 && t - openedAt >= 400) {
+          verifySends += 1
+          writeAll(encodeVerify())
+        }
+        if (t >= verifyDeadlineAt) {
+          if (probingNow && openedFor !== '') {
+            // 这个口不是板子（或没烧固件）：冷却它，**立刻换下一个候选**
+            rejectedUntil.set(openedFor, t + REJECT_COOLDOWN_MS)
+            candidateQueue = []
+            log(`[led] 串口 ${openedFor} 没有回应验证帧 → 换下一个候选（冷却 ${Math.round(REJECT_COOLDOWN_MS / 1000)}s）`)
+            fail(`串口 ${openedFor} 没有回应验证帧（可能不是 AI Status Lights）`, 'verify-timeout', CANDIDATE_RETRY_MS)
+          } else {
+            // 直连"上次成功的口"失败：清掉记忆，下一轮重新枚举 + 逐个探测
+            lastGoodPort = ''
+            fail(`串口 ${openedFor} 没有回应验证帧（可能不是 AI Status Lights）`, 'verify-timeout')
+          }
         }
         return
       }
       // 2) 已连上：读回包（板子目前只回验证串，读走避免缓冲堆满）
       drainReplies()
-      // 3) 渲染 + 交叉渐变 + 去重 + 心跳
-      const target = override !== null ? override(t) : renderPixels(scene, t, t - sceneSince)
-      let pixels = target
+      // 3) 渲染 + 交叉渐变 + 去重 + 心跳（全部走复用缓冲，稳态每帧 0 分配）
+      const target = override !== null ? override(t) : renderFrame.render(scene, t, t - sceneSince)
+      let pixels: Pixels = target
       if (fadeStart > 0) {
         const k = smootherstep((t - fadeStart) / FADE_MS)
         if (k >= 1) {
           fadeStart = 0
           fadeFrom = []
         } else {
-          // 渐变期间做时间抖动：低亮度只有几级台阶，交替 ±1 LSB 能铺平；
-          // 稳态不做（否则"画面没变"不成立，会一直写串口）。
-          pixels = ditherPixels(blendPixels(fadeFrom, target, k), frameSeq++)
+          // 渐变期间保留时间抖动（低亮度只有几级台阶，±1 LSB 能铺平；时段只有 250ms，
+          // 且画面在快速变化，抖动本身不可见）。
+          outFrame.blend(fadeFrom, target, k)
+          outFrame.dither(frameSeq++)
+          pixels = outFrame.pixels
         }
       }
-      // 动画帧也做时间抖动（低亮度只有几级台阶，呼吸/闪烁的底部会"跳格"）；
-      // 稳态（如已看过的完成色）不抖，否则去重失效、会一直写串口。
-      const animated = scene.state !== 'off' && scene.state !== 'error' && !(scene.state === 'done' && (scene.flags & 2) !== 0)
-      if (animated && fadeStart === 0) pixels = ditherPixels(pixels, frameSeq++)
+      // ⚠️ **稳态动画不再做时间抖动**（上一版这里对 running/waiting 每帧 ±1 LSB 交替）。
+      // 实测：彗星走到两端时速度≈0，同一颗灯的目标值连续多帧不变，而抖动让它每帧在
+      // 两个相邻灰度间来回跳（240Hz）—— 看起来就是"律动核心到两头时的极快微闪"。
+      // 量化校验：2400 帧里逐通道"±1 来回跳"的次数，原始渲染 4 次，加抖动后 16264 次。
+      // 抖动只在交叉渐变（画面快速变化、抖动被运动掩盖）时保留，稳态改回纯 8 位输出。
       lastPixels = pixels
       // 安全门控 ①：写入间隔不下于"这帧真正要占用的线上时间"。
       // 它保护的是**串口**（灌爆 USB 转串口的发送缓冲 → 灯一顿一顿的），不是帧率目标；
       // 帧率目标由控制器的帧周期决定，这里只做物理下限。宁可丢帧也不堆队列。
-      if (sentPixels.length > 0 && t - lastSentAt < minGapMs) return
-      const changed = !pixelsEqual(pixels, sentPixels)
+      if (hasSent && t - lastSentAt < minGapMs) return
+      const changed = !hasSent || !pixelsEqual(pixels, sentFrame.pixels)
       const due = t - lastSentAt >= heartbeatMs
       if (!changed && !due) return
+      // 自适应冗余：链路劣化时这一帧**写两遍**（第一份可丢动画帧 + 第二份必达控制帧）。
+      // 判定必须在第一份之前做：写出去之后 pending 就变 1 了；而第二份只在**传输层没积压**
+      // 时才补 —— 否则等于把队列灌满，画面只会更晚（背压优先于冗余）。
+      const wantRedundant = redundancyActive(t) && pendingNow() === 0
       // 安全门控 ②：**可丢的动画帧** —— 传输层积压时直接丢，下一次用最新画面重发。
       // 画面本来就是按绝对时刻算的，过期帧补发只会让灯"越追越晚"。
-      if (writeAll(encodeLeds(pixels), true)) {
-        sentPixels = pixels
+      if (writeAll(encodeLedsInto(pixels, ledsFrame), true)) {
+        sentFrame.copyFrom(pixels)
+        hasSent = true
         lastSentAt = t
+        // 第二份：句柄在 write() 返回前会拷走字节（见 encodeLedsInto 注释），复用同一缓冲安全。
+        if (wantRedundant) writeAll(ledsFrame, false)
       }
     },
     beep(beep) {
@@ -338,7 +474,9 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       return writeAll(frame, frame.length > 2 && frame[2] === MODE.LEDS)
     },
     restartFade() {
-      fadeFrom = lastPixels
+      // 快照：自检结束回到常规画面时从"当前像素"渐入（像素缓冲是复用的）
+      if (lastPixels.length > 0) fadeFrame.copyFrom(lastPixels)
+      fadeFrom = lastPixels.length > 0 ? fadeFrame.pixels : []
       fadeStart = now()
     },
     setOverride(fn) {
@@ -352,29 +490,49 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       fadeStart = 0
       fadeFrom = []
       if (writeLanding(encodeLeds(pixels))) {
-        sentPixels = pixels
+        sentFrame.copyFrom(pixels)
+        hasSent = true
         lastSentAt = now()
         return true
       }
       return false
     },
+    needsFrames() {
+      // 握手/重连完全靠帧循环推进（验证帧重发、候选轮转、打开重试）
+      if (state === 'opening' || state === 'verifying') return true
+      if (handle !== null && !verified) return true
+      // 交叉渐变窗口：逐帧按绝对时刻算进度，必须连续帧
+      if (fadeStart > 0) return true
+      // 覆盖动画（自检）
+      if (override !== null) return true
+      // 连续动画画面：流转/呼吸/闪烁
+      if (scene.state === 'running' || scene.state === 'waiting' || scene.state === 'error') return true
+      // done/off 是稳态；带提醒（正常不会出现，防御性）仍要闪
+      return (scene.flags & SCENE_FLAG.ATTENTION) !== 0
+    },
     reap() {
       if (!verified || handle === null) return
       const t = now()
-      // ① 写了这么久都没成功过 → 断
+      // 冗余期用"快速健康探针"：0x00 的频率与容忍时间都收紧，回包一缺就重连，
+      // 不等健康期的 2.5s/1.2s。带宽成本几乎为零（5 字节/秒都不到）。
+      const redundant = redundancyActive(t)
+      const probeTimeout = redundant ? probeTimeoutDegraded : probeTimeoutBase
+      const probeEvery = redundant ? probeEveryDegraded : probeEveryBase
+      // ① 写了这么久都没成功过 → 断（确认断开 → 允许发黑帧）
       if (lastWriteAt > 0 && t - lastWriteAt > STALE_MS) {
-        fail('串口无响应（可能已拔出）', 'write-failed')
+        fail('串口无响应（可能已拔出）', 'write-failed', undefined, true)
         return
       }
       // ② **主动探测**：拔掉 USB 后 Windows 往往仍让 WriteFile "成功"（写进缓冲丢弃），
       //    所以"写成功"不能证明设备还在。定期发一帧验证命令，收不到回包才判定断开。
-      if (probeSentAt > 0 && t - probeSentAt <= PROBE_TIMEOUT_MS) return
-      if (probeSentAt > 0 && t - probeSentAt > PROBE_TIMEOUT_MS) {
+      if (probeSentAt > 0 && t - probeSentAt <= probeTimeout) return
+      if (probeSentAt > 0 && t - probeSentAt > probeTimeout) {
         probeSentAt = 0
-        fail('串口无响应（可能已拔出）', 'verify-timeout')
+        noteQualitySignal(t, 'probe-timeout')
+        fail('串口无响应（可能已拔出）', 'verify-timeout', undefined, true)
         return
       }
-      if (t - lastProbeAt >= PROBE_EVERY_MS) {
+      if (t - lastProbeAt >= probeEvery) {
         lastProbeAt = t
         if (writeAll(encodeVerify())) probeSentAt = t
       }
@@ -393,7 +551,7 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         framesSent,
         bytesSent,
         dropped: droppedFrames,
-        pending: handle !== null && typeof handle.pending === 'function' ? handle.pending() : 0,
+        pending: pendingNow(),
         lastError,
         errorCode: lastErrorCode,
         retryInMs: handle === null && nextRetryAt > t ? nextRetryAt - t : 0,
@@ -401,6 +559,8 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         reply: scanner.stats,
         scene: `${scene.state}${scene.flags ? '+' + scene.flags : ''} bright=${scene.brightness}`,
         pixels: lastPixels,
+        quality: computeQuality(t),
+        redundancy: redundancyActive(t),
       }
     },
     close() {
@@ -420,25 +580,96 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     handle = null
     openedFor = ''
     verified = false
-    sentPixels = []
+    hasSent = false
     log(`[led] 串口已关闭（${why}）`)
+  }
+
+  // ── 链路质量（自适应冗余判据）─────────────────────────────────────────────
+
+  /** 滚动质量窗口：窗口过期就清零计数（纯时间驱动，不需要定时器）。 */
+  function rollQualityWindow(t: number): void {
+    if (qualityWindowAt === 0) { qualityWindowAt = t; return }
+    if (t - qualityWindowAt < QUALITY_WINDOW_MS) return
+    qualityWindowAt = t
+    winDropped = 0
+    winWriteFail = 0
+    winProbeTimeout = 0
+    winReconnect = 0
+  }
+
+  /**
+   * 记一个劣化信号：按类型计数；**只有质量真的掉下 ok 才进入冗余保持期**。
+   *
+   * 为什么不是"任何一个信号都进冗余"：传输层丢动画帧本来就是设计内的背压
+   * （积压时丢旧帧、发最新帧）。单次丢帧就双发，会让线上占用翻倍 → 更容易积压 →
+   * 更多丢帧，自我维持成恶性循环。所以单帧抖动只看不报；窗口内累计到阈值
+   * （或一次写失败/一次重连/一次探测超时）才切冗余。
+   *
+   * **只统计"已连接链路"上的劣化**：自动发现时"这个口不是板子"的握手失败不算 ——
+   * 否则每次插一个新的非板子串口都会白降频 10 秒。
+   */
+  function noteQualitySignal(t: number, kind: 'dropped' | 'write-fail' | 'probe-timeout' | 'reconnect'): void {
+    rollQualityWindow(t)
+    if (kind === 'dropped') winDropped += 1
+    else if (kind === 'write-fail') winWriteFail += 1
+    else if (kind === 'probe-timeout') winProbeTimeout += 1
+    else winReconnect += 1
+    if (computeQuality(t) !== 'ok') redundancyUntil = t + REDUNDANCY_HOLD_MS
+  }
+
+  function computeQuality(t: number): LinkQuality {
+    rollQualityWindow(t)
+    if (winProbeTimeout >= 1 || winWriteFail >= WRITE_FAIL_BAD || winReconnect >= RECONNECT_BAD) return 'bad'
+    if (winDropped >= DROPPED_SUSPECT || winWriteFail >= 1 || winReconnect >= 1) return 'suspect'
+    return 'ok'
+  }
+
+  /** 自适应冗余是否生效（劣化后保持 10s；之后没有新信号就自动退出）。 */
+  function redundancyActive(t: number): boolean {
+    return t < redundancyUntil
+  }
+
+  /** 传输层当前积压的帧数（没实现 pending 的句柄按 0 处理）。 */
+  function pendingNow(): number {
+    if (handle === null || typeof handle.pending !== 'function') return 0
+    try {
+      return handle.pending()
+    } catch (e) {
+      return 0
+    }
   }
 
   /** fail() 重入保护：断线熄灯那次写失败绝不能再触发一次 fail（否则递归风暴）。 */
   let inFail = false
 
-  function fail(message: string, code: LinkErrorCode = 'open-failed'): void {
+  /**
+   * 记一次链路故障并进入重连。
+   *
+   * `confirmed` = 这次故障已能确认设备确实不在了（探测超时 / 读失败 / 传输层硬故障）。
+   * **只有"确认断开"或"短时间内重复失败"才发黑帧**：瞬时写失败先不发黑 ——
+   * WS2812 锁存的那一帧本来就是绝对状态，重连后下一帧会立刻纠正；
+   * 而黑一下比"停在旧颜色"更刺眼，也更容易被用户当成设备挂了。
+   */
+  function fail(message: string, code: LinkErrorCode = 'open-failed', retryMs?: number, confirmed = false): void {
     if (inFail) return
     inFail = true
-    // 断线时先把灯熄掉：WS2812 会锁存最后一帧，不熄就会"卡在最后一个颜色上"，
-    // 用户看到的就是"断开重连时卡住不动"。
+    const t = now()
+    const wasConnected = verified && handle !== null
+    const repeat = wasConnected && lastFailAt > 0 && t - lastFailAt < FAIL_CONFIRM_MS
+    const blackout = wasConnected && (confirmed || repeat)
+    // 确认断开才先把灯熄掉：WS2812 会锁存最后一帧，不熄就会"卡在最后一个颜色上"。
     try {
-      if (handle !== null && verified) {
+      if (blackout && handle !== null) {
         // **裸写**：直接调句柄，不走 writeAll（不进统计、不打日志、绝不再次 fail）
         handle.write(encodeLeds(Array.from({ length: LED_COUNT }, () => ({ r: 0, g: 0, b: 0 }))))
       }
     } catch (e) { /* ignore */ }
-    const wait = backoff[Math.min(attempt, backoff.length - 1)] ?? 30000
+    if (wasConnected) {
+      lastFailAt = t
+      noteQualitySignal(t, 'reconnect')
+    }
+    // 候选轮转时用固定短间隔（retryMs）；直连已知口才走指数退避
+    const wait = retryMs ?? (backoff[Math.min(attempt, backoff.length - 1)] ?? 30000)
     try {
       lastError = message
       lastErrorCode = code
@@ -460,32 +691,47 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
   /** "写入 0 字节"日志的节流时间戳。 */
   let zeroLogAt = 0
 
+  /** 这个口是不是还在冷却期（拒绝过 = 握手无应答 / 打不开）。 */
+  function isRejected(path: string, t: number): boolean {
+    const until = rejectedUntil.get(path)
+    if (until === undefined) return false
+    if (until <= t) { rejectedUntil.delete(path); return false }
+    return true
+  }
+
   function writeAll(frame: Buffer, coalesce = false): boolean {
     if (handle === null) return false
+    const t = now()
     try {
       const written = handle.write(frame, { coalesce })
       if (written === WRITE_DROPPED) {
         // 传输层积压 → 这帧主动丢掉（背压），**不是故障**：
         // 不更新 lastWriteAt、不进 framesSent，下一次 tick 会用最新画面重发。
         droppedFrames += 1
+        // 已连接链路上的丢帧是**劣化信号**（自适应冗余据此切双发）；握手/控制帧的丢帧不算
+        if (verified) noteQualitySignal(t, 'dropped')
         return false
       }
       if (written === 0) {
         // 0 字节：串口超时后"成功返回但没传出去"是 Windows 允许的行为。
         // 日志**节流**：帧循环 240 次/秒，每条都记会把日志刷爆（曾经 142ms 内 3372 条）。
-        const t = now()
         if (t - zeroLogAt > 2000) { zeroLogAt = t; log('[led] 写入 0 字节（串口超时/设备已移除）') }
       }
       if (written !== frame.length) {
-        fail(`写入不完整（${written}/${frame.length} 字节）`, 'write-failed')
+        consecutiveWriteFails += 1
+        if (verified) noteQualitySignal(t, 'write-fail')
+        fail(`写入不完整（${written}/${frame.length} 字节）`, 'write-failed', undefined, consecutiveWriteFails >= 2)
         return false
       }
       framesSent += 1
       bytesSent += written
       lastWriteAt = now()
+      consecutiveWriteFails = 0
       return true
     } catch (e) {
-      fail((e as Error).message, 'write-failed')
+      consecutiveWriteFails += 1
+      if (verified) noteQualitySignal(now(), 'write-fail')
+      fail((e as Error).message, 'write-failed', undefined, consecutiveWriteFails >= 2)
       return false
     }
   }
@@ -520,7 +766,10 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       const chunk = handle.read()
       if (chunk.length === 0) return
       const found = scanner.push(chunk)
-      if (found > 0) probeSentAt = 0          // 回包到了：探测通过
+      if (found > 0) {
+        probeSentAt = 0          // 回包到了：探测通过
+        consecutiveWriteFails = 0
+      }
       if (found > 0 && !verified) {
         verified = true
         lastGoodPort = openedFor
@@ -532,11 +781,15 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
         attempt = 0
         lastError = ''
         lastErrorCode = ''
-        sentPixels = []
+        hasSent = false
+        // 找到真板子：清空候选轮转状态（下次重连直接开这个口）；把它从冷却表里摘掉
+        candidateQueue = []
+        rejectedUntil.delete(openedFor)
         log(`[led] 握手成功：${openedFor} 是 AI Status Lights`)
       }
     } catch (e) {
-      fail(`读取串口失败：${(e as Error).message}`, 'read-failed')
+      // 读失败 = 句柄真的坏了（不是瞬时写抖动）：确认断开，允许发黑帧
+      fail(`读取串口失败：${(e as Error).message}`, 'read-failed', undefined, true)
     }
   }
 
@@ -550,35 +803,49 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
     const openGen = gen
     try {
       let target = port
+      probingNow = false
       if (target === '' || target === 'auto') {
-        // **事件驱动优先**：重连时先直接开"上次成功的端口"。CreateFile 对不存在的口
-        // 会立刻失败（~20ms），比枚举便宜，也不会撞上"设备正在插拔、枚举卡住"的窗口。
-        // 只有从没成功过 / 直连刚失败过才枚举，且枚举节流到 ≥5s 一次（它只是兜底发现）。
+        // **事件驱动优先**：重连时先直接开"上次成功的端口"（CreateFile 对不存在的口
+        // 会立刻失败，比枚举便宜，也不撞"正在插拔、枚举卡住"的窗口）。
+        // 没有记忆 / 记忆的口已被拒绝 → 按候选队列**逐个探测**（对齐参考上位机）：
+        // 过去的做法是"只挑一个硬试"，选错（COM19 是手机）就永远轮不到真正的板子。
         const nowMs = now()
-        if (lastGoodPort !== '' && nowMs - lastEnumerateAt < ENUMERATE_EVERY_MS) {
-          target = lastGoodPort
+        const good = lastGoodPort
+        if (good !== '' && !isRejected(good, nowMs)) {
+          target = good
         } else {
-          const ports = await options.list()
-          if (openGen !== gen) return // 枚举期间连接被关闭/复位 → 这次结果作废
-          lastEnumerateAt = now()
-          target = pickAutoPort(ports)
-          if (target === '' && lastGoodPort !== '') target = lastGoodPort
-          if (target === '') {
-            lastError = '没有找到任何串口设备'
+          if (candidateQueue.length === 0) {
+            // 枚举：候选轮完一轮后至少隔 5s 再枚举（枚举本身是"卡死风险"操作）
+            if (knownPorts.length === 0 || nowMs - lastEnumerateAt >= ENUMERATE_EVERY_MS) {
+              const ports = await options.list()
+              if (openGen !== gen) return // 枚举期间连接被关闭/复位 → 这次结果作废
+              lastEnumerateAt = now()
+              knownPorts = Array.from(ports)
+              const order = autoPortOrder(knownPorts)
+              log(`[led] 串口候选：${order.join(', ') || '无'}（逐个发验证帧找板子）`)
+            }
+            candidateQueue = autoPortOrder(knownPorts).filter((p) => !isRejected(p, nowMs))
+          }
+          if (candidateQueue.length === 0) {
+            lastError = knownPorts.length === 0
+              ? '没有找到任何串口设备'
+              : '所有串口都没有回应验证帧（板子可能没插好 / 没烧录 / 口被别的程序占用）'
             lastErrorCode = 'no-device'
             state = 'error'
-            nextRetryAt = t + 10000
+            nextRetryAt = t + 10_000
             attempt += 1
             return
           }
-          log(`[led] 自动选择串口：${target}（候选 ${ports.map((p) => p.path).join(', ') || '无'}）`)
+          target = candidateQueue.shift() as string
+          probingNow = true
         }
       }
       let h
       try {
         h = await options.open(target, baud)
       } catch (e) {
-        // 直连那个口失败（拔了/换了口）→ 下一轮改成枚举
+        // 打不开（被别的程序占着 / 已拔出）→ 让它冷却，下一轮换下一个候选
+        if (probingNow && target !== '') rejectedUntil.set(target, t + REJECT_COOLDOWN_MS)
         if (target !== '' && target === lastGoodPort) lastGoodPort = ''
         throw e
       }
@@ -593,6 +860,8 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       openedFor = target
       openedAt = now()
       verified = false
+      verifySends = 1
+      verifyDeadlineAt = openedAt + (probingNow ? PROBE_HANDSHAKE_MS : verifyTimeoutMs)
       scanner.reset()
       state = 'verifying'
       // 把传输层的异步故障接进链路（worker 卡死/串口线程退出/写超时）。
@@ -602,7 +871,8 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
       const faultGen = openGen
       h.onFault = (message: string) => {
         if (faultGen !== gen) return
-        fail(message, 'write-failed')
+        // 传输层自报的故障（worker 卡死/线程退出/写超时）= 确认断开 → 允许发黑帧
+        fail(message, 'write-failed', undefined, true)
       }
       // 立刻发验证帧：板子回 ASCII，回包到了才算连上
       writeAll(encodeVerify())
@@ -621,19 +891,29 @@ export function createSerialLink(options: SerialLinkOptions): SerialLink {
 }
 
 /**
- * 自动挑端口：优先 CH340（VID/名称里带 CH34 的往往是这类小板子），
- * 其次 COM 号大的（USB 转串口通常是后插的、号更大），最后任意可用口。
- * 真正的"是不是本板子"由握手回答，所以这里只需要一个合理的起点。
+ * 自动模式的**候选顺序**（对齐参考上位机 `ail_link.list_ports` 的排序思路）：
+ * USB 转串口（CH34x / VCP / USBSER / 描述里带 "USB-SERIAL"）排在前面，
+ * 同组内 COM 号**从大到小**（USB 口通常是后插的、号更大；也保留旧版行为）。
+ *
+ * 注意：顺序只是"先试谁"，**谁是真板子一律由握手回答**——所以哪怕排序全错，
+ * 候选轮转也会一个一个试到对为止。
  */
+export function autoPortOrder(ports: readonly LinkPortInfo[]): string[] {
+  const isUsbSerial = (p: LinkPortInfo): boolean =>
+    /CH34|ch341|ch343|ch9102|usb.?serial|VCP|USBSER/i.test(`${p.path} ${p.label}`)
+  const comNumber = (p: LinkPortInfo): number => Number((/^COM(\d+)/i.exec(p.path) ?? [])[1] ?? 0)
+  return Array.from(ports)
+    .sort((a, b) => (
+      (Number(isUsbSerial(b)) - Number(isUsbSerial(a)))     // USB 口优先（true 排前面）
+      || (comNumber(b) - comNumber(a))                      // 其次 COM 号大的
+      || a.path.localeCompare(b.path)
+    ))
+    .map((p) => p.path)
+}
+
+/** 自动挑端口（= 候选顺序里的第一个；保留给旧调用方/测试）。 */
 export function pickAutoPort(ports: readonly LinkPortInfo[]): string {
-  if (ports.length === 0) return ''
-  const ch340 = ports.find((p) => /CH34|ch340|usb.?serial/i.test(`${p.path} ${p.label}`))
-  if (ch340) return ch340.path
-  const numbered = ports
-    .map((p) => ({ p, n: Number((/^COM(\d+)/i.exec(p.path) ?? [])[1] ?? 0) }))
-    .sort((a, b) => b.n - a.n)
-  const first = numbered[0]
-  return first ? first.p.path : ports[0]!.path
+  return autoPortOrder(ports)[0] ?? ''
 }
 
 /** 端口名是否看起来像一个合法串口（防止把 'auto' 之类当端口去打开）。 */

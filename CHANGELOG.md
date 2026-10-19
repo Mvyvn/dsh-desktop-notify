@@ -1,5 +1,510 @@
 # Changelog
 
+## [2.4.16] - 2026-10-20
+
+### 前台诊断：记录 Windows 拒绝现场
+
+- `focus-win32` 的返回值新增 `diag`：调用进程 PID、前台窗口的 pid/exe/类名/标题/visible/iconic、
+  目标窗口同组信息、`SPI_GETFOREGROUNDLOCKTIMEOUT`、`GetLastInputInfo` 计算的最后输入年龄、
+  `SetForegroundWindow` 返回值与 `GetLastError`。
+- 宿主在 `前台激活 …` 后再写一行 `前台诊断: {json}`，下次点击可直接看到“前台是谁/是否最小化/
+  锁超时/最后输入”等判定条件；若最终是靠“观察到已在前台”成功，`diag.lastDenied` 保留最后一次
+  `SetForegroundWindow` 失败时的同一组现场。
+- 说明：`SetForegroundWindow` 没有官方拒绝原因；Windows 11 上
+  `SPI_GETFOREGROUNDLOCKTIMEOUT` 固定返回 `2147483647`（无参考意义），该字段只用于记录。
+- 行为不变：仍是 best-effort，不新增抢前台技巧。
+
+## [2.4.15] - 2026-10-20
+
+### 诊断：把 focus/设置跳转的真实结果写进日志
+
+- `/dnotify/sw/report` 的字段白名单补上 `from/status/windowFound/atFront/attempts/reason/
+  stage/result/elapsedMs`。此前 SW 上报的 `focus-result` 只剩 `kind`，日志看不出成功失败。
+- 页面打开「设置 → 内置插件」时上报 `settings-open`：`start` / `ok` /
+  `cell-click-timeout` / `cell-missing-timeout` / `open-timeout`，带耗时。
+  这能把“浏览器已到前台但设置没打开”和“前台没成功”分开。
+
+## [2.4.14] - 2026-10-20
+
+### 前台：优先用浏览器 API 的结果，不再把枚举当轮询
+
+- **浏览器 API 优先**：`WindowClient.focus()` 之后，`GetForegroundWindow()` 若已是受支持的
+  浏览器窗口（firefox/chrome/msedge/brave/vivaldi/opera/librewolf），直接判定成功，不枚举、
+  不额外抢；通知中心等占前台时先短暂等待重读，仍不是浏览器才**回退一次枚举**（按 DSH 标题/
+  唯一候选），避免把 EnumWindows 当作轮询手段。
+- **openWindow**：保留返回的 `WindowClient` 并调用 `focus()`；页面注册（load）后才请求宿主。
+- **窗口身份类型**：Win32 `BOOL` 统一声明为 32 位 `int`；`EnumWindowsProc` 回调返回 `int`；
+  `OpenProcess` 的 inherit 参数传 `0`（此前用 bool 会在部分调用下取不到进程名）。
+- **合并限流**：去掉“800ms 内直接丢弃”，改为 in-flight 合并；上一次没到前台时，期间到达的
+  请求在结束后补跑一次，成功则不重试。
+- **可观测性**：`/dnotify/focus` 现在等本次尝试结束，返回
+  `{windowFound, atFront, attempts, reason}`；SW `requestHostFocus()` 等待响应并回报
+  `focus-result` / `focus-request-failed`，不再把 HTTP 200 当“已成功”。
+- **SW 生命周期**：`register-page` / `show-notification` 用 `event.waitUntil` 跟踪异步 IDB/展示；
+  `page-focus` 的失焦只允许清掉当前最后聚焦的同一 pageId，避免迟到 blur 清空别的标签页。
+
+## [2.4.13] - 2026-10-20
+
+### 前台：等页面 ack 后再请求 + 有限重试/校验（仍用 koffi，不换 ps1）
+
+- **时序**：SW 不再在 `postMessage('dsh-navigate')` 后立刻请求 `/focus`。页面应用完跳转
+  （`applyTargetWithRetry` 落地或重试结束）后回 `dsh-navigated` + nonce，SW 收到 ack 才请求；
+  旧页面 bundle 不 ack 时 2s 超时兜底。新开窗口等新页面 `register-page`（load）或 1.5s 超时。
+- **helper**：`focus-win32` 改为约 2s 内最多 8 次有限重试——每轮重新 `EnumWindows`（窗口/标题
+  可能还在更新）→ `ShowWindowAsync` → 等一帧 → `SetForegroundWindow` → 等 120ms 用
+  `GetForegroundWindow` 验证；成功即返回，失败才继续，仍失败记录 `atFront=False`。
+- **FFI**：`EnumWindowsProc` 的 `lParam` 从 `long` 改为 `intptr_t`（x64 `LPARAM` 是
+  `intptr_t`；本轮虽只传 0/不读，仍按真实签名声明）。
+- 修正 SW 遗留的“页面在跳转后请求前台”旧注释；测试锁住“未 ack 不得请求、ack 后才请求”。
+
+## [2.4.12] - 2026-10-20
+
+### 子代理终止原因补全
+
+- `subagent/end.stopReason` 映射补齐：`aborted`（手动终止/取消，含 `abort/cancelled/canceled/
+  killed/terminated/stopped/interrupted` 别名）→“已终止”；`error/failed/failure`→“出错”；
+  `max-tokens`→“达到 token 上限”；`refusal/refused`→“拒绝执行”；`timeout`→“超时”。
+- **只有明确的 `completed` 才算正常结束**；缺少 `stopReason` 或未知值按终止处理，
+  显示“未提供终止原因”或“终止（原值）”，不再出现空白的 `子代理:`。
+
+## [2.4.11] - 2026-10-20
+
+### 前台激活改 koffi，删除 focus.ps1
+
+- `/dnotify/focus` 不再 spawn PowerShell：宿主按平台动态 import `src/focus-win32.ts`，
+  用 **koffi 直接调 user32**：`EnumWindows` → 按 `MozillaWindowClass`/`Chrome_WidgetWin_1`
+  + 进程名（firefox/chrome/msedge/brave/vivaldi/opera/librewolf）排除 VS Code 等 Electron，
+  再找标题含 dsh/deepseek/harness 的窗口 → `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`。
+- 删除 `assets/dsh-notify-focus.ps1`（以及 `%TEMP%\dsh-notify-focus.log`）；结果改写宿主日志
+  `前台激活 hwnd=… set=… atFront=… title=…`。没有浏览器窗口时只记录“跳过”，不 spawn 任何进程。
+- 仍然只是**一次最简单的 Win32 尝试**：不保证后台进程能绕过 Windows 前台锁。
+
+### 灯：回退为只看标签页级
+
+- 回退 2.4.9 的“按每种通知预设 silence 分级”：灯不再区分 session/tab，统一使用
+  **标签页级聚焦**（`PageRegistry.focusedLive`：任一 DSH 页面可见且持焦点即算“人在看”）。
+- 删除 `isSessionFocused`、每会话 `focusLevel` 及 `noteDone/noteWarn/noteError` 的级别参数；
+  红灯“看满 2 秒”也只看标签页级。通知的静默判定仍按各自预设，和灯互不影响。
+
+## [2.4.10] - 2026-10-20
+
+### 会话终止（红）与后台子代理终止（黄）
+
+- **会话终止**：监听 DSH 已有的 `session/event` → `turn/end.reason`（没有单独的
+  `session/end` 运行时事件）。只处理根会话自己的 turn：
+  - `aborted` + `AgentCancelCause`：`user` → 用户中止；`parent` → 母会话中止；
+    `disposed` → 会话已关闭；`hook` → 被 hook 中止（带原因）；
+  - `error`（`LlmFailure`，含模型断链）→ 出错：<message/code>；
+  - `max-tokens` → 达到输出 token 上限；`blocked` → 回合被阻塞；
+    `crash-orphaned` → 异常中断（进程崩溃）。
+  - 通知标题 `⛔ DSH 会话终止`，正文 `工作区/会话名:终止原因`，灯 **红**；
+    随后根 agent idle 的 800ms 任务完成通知在 5s 内被抑制，不会红/绿互相覆盖。
+- **后台子代理终止**：复用现有 `subagent/end.stopReason`：
+  `aborted/error/max-tokens/refusal` 等非 `completed` → 标题 `⏹️ DSH 后台子代理终止`，
+  正文 `工作区/母会话名:子代理名:终止原因`，灯 **黄**；`completed` 仍走原绿色完成。
+- 没有新增事件源/定时器/轮询：全部沿用 DSH 的 `turn/end`、`subagent/end` 与现有 `notify`/`note*`。
+
+## [2.4.9] - 2026-10-20
+
+### 浏览器通知点击前台：只保留最简单的 Win32 尝试
+
+- 删除所有前台“技巧”：不再有 COM `AppActivate`、UIA `SetFocus`、关闭通知中心的 Esc、
+  3.6s 重试、`AttachThreadInput`、TOPMOST、稳定校验；SW→页面 `focusUrl` 时序与
+  `/dnotify/page-focus` 下发 `focusUrl` 也一并删除。
+- 现在只有一条最短路径：SW `WindowClient.focus()` → postMessage 跳转 → 直接 `GET /dnotify/focus`；
+  宿主 helper 只做 `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`，记录一次结果
+  （`set=/atFront=`）。抢不到就抢不到，不再叠任何补丁。
+- 无目标通知的规则不变：宿主不下发 `target/deepLink/focusUrl`，SW 通知 data 只有 `pageId`，
+  点击只关闭、不 focus / openWindow / 请求前台。
+
+### 灯：聚焦级别改为取各通知预设的 silence
+
+- 灯不再直接读“标签页是否聚焦”的全局门控，而是按事件/会话的预设级别：
+  - `silence='tab'`（看着标签页时静默）→ **标签页级**：任一 DSH 标签页聚焦即算“已看”；
+  - `silence='session'`（看着会话时静默）→ **会话级**：只有正在看这个会话才算“已看”；
+  - `silence='never'`（从不静默）→ 按 **会话级**处理（与默认一致）。
+- 控制器新增 `isSessionFocused`（来自 `gate.silenced`）与每会话 `focusLevel`，`noteDone/noteWarn/noteError`
+  可带级别；目标/子代理/团队/后台任务/审批被拒分别取 `goal/subagent/team/jobs/denied` 的预设。
+  默认预设都是 session，因此“看着别的会话时”不再被误判成已看。
+
+## [2.4.8] - 2026-10-20
+
+### 灯：删除目标不参与判定（不灭灯、不抑制 done）
+
+- 目标被删除（`clear`）时**不做任何灯动作**：不 `noteDone/noteWarn/noteError`，也不再有
+  "删除就抑制 done 直到下一次活动"的 `suppressDone` 支路。
+- 灯完全按当前事实走：原本运行白就继续白，完成绿就继续绿，不会被强制熄灭一段时间。
+- 同步删除控制器 `noteCanceled` API 与其测试。
+
+## [2.4.7] - 2026-10-20
+
+### 点击跳转回退到 2.4.5（浏览器通知路径已验证可用）
+
+- 2.4.7 曾把 `focusBrowserWindow()` 加到 `/dnotify/click` 与 `/dnotify/activate`，
+  并在 `target=none` 时收紧行为；实测导致浏览器通知点击的跳转/前台回归。
+  按要求**回退这部分**：`/click`、`/activate` 不再额外抢前台，`target=none` 的 SW 语义也恢复。
+- 保留 2.4.5 已经修好的路径：SW 点击后请求 `/dnotify/focus`；页面收到 `dsh-navigate`
+  时用最近通知的 `focusUrl` 补一次；Win32 helper 与 `/focus` 端点不变。
+
+### 浏览器通知：所有点击跳转都补前台
+
+- `/dnotify/page-focus` 的响应现在下发本进程的 `focusUrl`；**任何**页面收到 SW 的
+  `dsh-navigate` 都能补一次 `/dnotify/focus`，不要求它自己显示过那条通知
+  （解决"通知显示页 ≠ 点击落页"时旧 SW 没有 focusUrl 的问题）。
+- SW 在"找不到目标页面、需要 openWindow 新开"的分支也调用 `requestHostFocus()`，
+  新开窗口同样补一次前台；有目标页时仍然先 `WindowClient.focus()` 再 postMessage + `/focus`。
+- **无点击跳转目标（`target=none`）的通知保持原样**：SW 点击只关闭通知，不 focus、
+  不 `openWindow`、不请求 `/focus`——不会因为补前台多开一个页面。
+- **真正修复 helper 不执行**：宿主 spawn PowerShell 时用了 `detached: true`；Windows 上
+  detached PowerShell 会以 0 退出但**根本不执行 `-File`**（最小脚本复现：detached 不写文件，
+  non-detached 正常）。这就是之前 `/focus` 有宿主日志、却既无 helper 日志也无前台的原因。
+  改为 `stdio:'ignore' + windowsHide + unref`（不 detached），并记录 spawn error/exit code。
+- **前台激活本身也加强了**：优先用旧版跑通过的 **WScript.Shell COM `AppActivate`**
+  （少一层“调用进程不在前台”的守卫）和 **UIA `AutomationElement.SetFocus()`**；
+  不行才在约 3.6s 内重试 `ShowWindow + AttachThreadInput + SetForegroundWindow`，
+  最后 `SwitchToThisWindow` 并用 `GetForegroundWindow()` 验证。
+  ⚠️ ALT 只在第一次尝试时注入——每轮注入输入会不断刷新前台锁，反而永远等不到它过期。
+  实在抢不到焦点时用 `SetWindowPos(TOPMOST→NOTOPMOST)` 至少把浏览器窗口抬到可见层
+  （日志 `raised=True`）。实测 `tries=1 set1=False atFront=True fg=<hwnd>`（COM 直接成功）。
+
+### 修：重启后残留阻塞仍然亮红（上一版快照没生效）
+
+- 根因：`ctx.inject(['goals','agents'])` 的启动快照在真实宿主里没有拿到目标（没有日志），
+  所以补发事件和 facts 都还是把旧 blocked 当新异常。
+- 改为**不依赖 goals 服务**：控制器在启动后的采集窗口（10s）内记录每个会话当时的目标阶段；
+  其中 blocked 的会话直接 `acknowledgeBlocked`，补发的同阶段 `block` 事件由
+  `startupGoalPhase()` 识别并跳过。阶段变化后快照失效，新阻塞/完成照常处理。
+- complete 的补发同样按"启动时已是 complete"跳过，不再重启后重新亮绿。
+
+### 运行律动：整体 +3%，两端 5% 减速回退
+
+- `COMET_MS_PER_LED` = 170 / 1.03 ≈ **165.05ms/灯位**（整体加快 3%）；
+- 去掉上一版的相位微扰，只保留单摆曲线（端点速度为 0），两端不再额外减速。
+
+## [2.4.6] - 2026-10-20
+
+### 设置跳转：新版 DSH 把设置收进左下角「账号菜单」
+
+- 新版 DSH 网页端也没有独立的「设置」按钮了：设置项在
+  `button[aria-label="账号菜单"][aria-haspopup="menu"]` 打开的菜单里。
+  之前只找「设置」按钮，账号菜单根本没被打开 → 菜单项的「设置」不存在 →
+  一直重试到 10s 超时（用户看到的"不手动点账号菜单就卡住"）。
+- 修复：网页端也走「账号菜单 → 设置」路径；触发器按 `账号|账户|Account|用户|User`
+  匹配，点开后等 120ms 再找菜单项；没有「设置」就 Esc 关掉（不点第一个 menu 按钮）。
+  桌面端仍不合成快捷键（原生输入接管）。
+
+### 灯：重启后残留目标状态不再补报
+
+- DSH 重启后会补发 `goal/changed block/complete`（同一 goal revision），旧逻辑把它当新事件
+  → 红灯/通知/绿灯再出现一次。现在启动时通过 `goals.get()` 快照**所有已存在目标的
+  id:revision**，同 revision 的补发事件直接跳过；控制器把其中 blocked 的会话标成
+  "启动前已看过"，不会从 facts 里再判出一次 error。新 revision（新阻塞/完成）仍正常响应。
+
+### 运行中律动：整体 +5%，两端再 -5%
+
+- `COMET_MS_PER_LED` 170 → **161.5ms**（一趟约 0.97s，整体加快 5%）；
+- 位置曲线加相位微扰 `uw = u - a·sin(2πu)/(2π)`（a≈0.0488）：
+  端点绝对速度 ≈ 原来的 0.95（两端再减慢 5%），中段 ≈ 1.05。
+
+## [2.4.5] - 2026-10-20
+
+### 浏览器通知（非协议模式）也能把窗口带到前台
+
+- 页面收到 SW 的 `dsh-navigate`（通知点击）时，用最近一条通知随附的 `focusUrl` 请求
+  `/dnotify/focus`；宿主用 Win32 `SetForegroundWindow`（独立 PowerShell，ALT 解前台锁）抬窗口。
+- 这样**不依赖 SW 先更新**：即使浏览器里还是旧版 `dnotify-sw.js`（不会自己 fetch `/focus`），
+  新的 `lib/client.js` 也能补上这次前台激活。反过来，新 SW 也会自己请求，二者幂等（宿主 800ms 节流）。
+- 真机实测（直接运行 helper，当前 Firefox 窗口）：`set=True`，即 `SetForegroundWindow` 成功；
+  `activated=False` 只是 `AppActivate` 的返回值，不影响 `set`。
+- 注意：页面需要刷新一次以加载新的 `lib/client.js`；Windows 前台锁在少数情况下仍可能拒绝（日志可查）。
+
+## [2.4.4] - 2026-10-20
+
+### 修：聚焦时红灯 2s 熄灭后，灯卡在 off、吞掉运行白/完成绿
+
+- 根因：目标 blocked 是**持续事实**。聚焦看满 2 秒后熄灭只清了 `lastError`，
+  `goalPhase=blocked` 仍让账本每次判定为 error；判定器把 error 当"已看"跳过，
+  但账本再也不会给出 running/done —— 于是红灯熄灭后一直 off。
+- 修复：账本新增 `blockedAcked`。红灯被看到（聚焦满 2 秒 / 显式确认）时同时
+  `acknowledgeBlocked()`，blocked 不再压住 running/done；下列情况自动恢复：
+  - 离开 blocked（goalPhase 变化）→ 清除；
+  - 新的阻塞/异常事件（`noteError`）→ 清除并重新亮红。
+- 顺带消除红灯熄灭后每 1.5s 刷一次 `异常已被看到，清除账本中的异常记录` 的日志噪音。
+- 新增回归：聚焦 error → 2s 熄灭 → 运行白 → 结束绿；blocked 看过后回 running/done，
+  新阻塞重新亮红。
+
+## [2.4.3] - 2026-10-20
+
+### 点击跳转：前台置顶 + 自检跳转速度
+
+- **点击后浏览器窗口不来前台**：浏览器通知点击时 SW 仍先 `WindowClient.focus()`（切标签页），
+  随后请求宿主新增的 `/dnotify/focus`；宿主异步 spawn 独立 PowerShell 做
+  `ShowWindow(SW_RESTORE) + ALT 解前台锁 + SetForegroundWindow/AppActivate`，不阻塞点击链路。
+  只对 Windows 生效，`focusWindow: false` 可关；找不到唯一浏览器窗口时不动（不抢焦点）。
+- **自检提示（启动播报）点击跳设置更跟手**：设置弹窗轮询 120ms → **100ms**、入口重试
+  600ms → **300ms**，设置一出现就立刻点；等待上限仍 10s。**只等设置弹窗，不打开插件面板兜底**。
+
+### 灯：颜色、闪烁衔接、优先级、目标删除
+
+- **黄灯 2s → 1s**；**橙灯改得更橙**（`#ffa000` → `#ff8800`），与黄灯拉开色差。
+- **红灯双闪包络两端加 25ms 渐变**：不再方波硬切，被确认/切场景时不会停在"亮到一半/暗到一半"；
+  链路本身仍从当前像素交叉渐变。
+- **统一优先级：报错（含目标阻塞） > 等待 > 运行中 > 完成**。旧实现先看等待、且目标阻塞排在
+  pending 之后 → 跑着时"目标阻塞"的红灯要等运行结束才出现；现在阻塞立即红，不再等。
+- **目标被删除（clear）≠ 完成**：删除不亮绿灯，抑制 done 画面直到下一次真实活动
+  （running/waiting/error）；之后新工作的完成才重新亮绿。
+
+### 测试
+
+- 新增：生命周期"阻塞压过运行中"、控制器"删除目标不亮绿 / 下一次活动恢复"、
+  提醒包络渐变、`/dnotify/focus` 令牌保护；全量 **423 tests pass**。
+
+## [2.4.2] - 2026-10-20
+
+### 灯色映射调整：后台任务完成移出绿灯
+
+- **后台任务完成不再点灯**（与团队任务待处理/上下文压缩/定时任务启动/插件挂载同组）。
+- 保留：任务完成、后台子代理结束、目标已完成、团队任务已完成 → 绿（2s）；
+  后台任务**失败/被终止** → 黄（2s）；目标阻塞 → 红。
+
+## [2.4.1] - 2026-10-20
+
+### Windows Toast 发送移入独立 worker（真机验证通过）
+
+- 新增 `src/toast-worker.ts` / `src/toast-bridge.ts`：WinRT 的 `RoActivateInstance` /
+  `LoadXml` / `Show` 全是**同步 COM**（实测单条可 >100ms），现在在独立 worker 线程执行，
+  主线程只 `postMessage` —— 发通知不再顶住事件循环（心跳/SSE/灯采样/UI）。
+- **安全网**：worker 启动先 probe（只初始化 WinRT + 建 notifier，**不弹通知**）；
+  probe 失败 / 超时 / 线程退出 → 自动回退主线程 inline（行为与 2.4.0 完全一致）；
+  单条发送报错 → 该条 inline 补发一次，worker 继续用；probe 期间的通知先排队。
+- `registerClickProtocol` 的结果通过消息同步给 worker，点击仍走 `dsh-notify:` 协议
+  （不会退化成浏览器落地页）。
+- **真机验证**（Windows 11）：新增 `scripts/toast-worker-probe.mjs`，实测
+  inline probe/send OK → worker probe OK → worker 发送成功（无 inline 回退）→ close 后
+  回退 inline 成功；Windows 通知中心可查到三条验证 Toast。
+- 单测 `tests/toast-bridge.test.mjs`（假 worker）覆盖：probe 成功走 worker、probe 失败
+  回退、线程退出回退、单条失败补发、probe 超时、协议同步。
+
+### 说明：Firefox 源码映射 404
+
+- 浏览器 devtools 里的 `source-map-loader ... 404`（`/plugins/??...client.js.map&rev=…`）
+  是**重建后旧 bundle rev 的源码映射请求**：插件 `lib/` 一改，DSH 的 client 模块图 rev
+  就变，devtools 还拿着旧 rev 去取 map，宿主只保留当前/上一批 rev → 404。
+  纯 devtools 现象，不影响功能；**刷新页面**后 rev 对齐即消失（插件侧无需也无法改）。
+
+## [2.4.0] - 2026-10-20
+
+### 指示灯：新增「黄灯」与事件→灯色映射（用户指定）
+
+- 新状态 `warn`（黄，`#FFD000`）：**无论是否聚焦都只亮 2 秒**，优先级
+  **红（error）> 黄（warn）> 橙（waiting）> 绿（done）> 白（running）**；
+  黄/绿脉冲不会打断橙/红画面。
+- 事件映射：任务完成 / 后台子代理结束 / 后台任务完成 / 目标已完成 / 团队任务已完成 → **绿（2s）**；
+  等待你回答 → 橙呼吸；审批被自动拒绝、后台任务失败或被终止 → **黄（2s）**；
+  目标阻塞 → **红**；团队任务待处理 / 上下文压缩 / 定时任务启动 / 插件挂载 → **不点灯**。
+- 律动（running）曲线改为**单摆式**（端点速度严格为 0）：折返处不再有一帧内反向造成的
+  2 LSB 凹陷 —— 这就是"两头极快微闪"的根因（旧曲线端点仍有 0.7 倍速）。
+- 修复关灯再开灯后灯概率不亮：重新启用时取消残留淡出、把当前画面重新下发给链路，
+  链路 closed 时立刻重开；关闭路径现在**也会广播状态**（设置页不再停在"运行中"）。
+- 设置页「点击测试」新增「警告」一项；`/dnotify/led` 的 `test` 白名单接受 `warn`。
+
+### 对外 API v1.1.0（兼容旧 API）
+
+- `NOTIFY_API_VERSION = '1.1.0'`；`LED_API_VERSION = '1.1.0-led.3'`；新增能力
+  `led.scene.warn` / `led.host-only`。
+- **1.0.x 调用方完全兼容**：返回字段与行为不变；外部 `push` / `notify` **默认不点灯**
+  （灯只跟随宿主事件，想主动点灯必须显式调用 `desktopNotify.led`）。
+- README 新增「串口 LED 状态灯：给其它插件调用（对外 API）」子节（归在通用对外 API 一节下），
+  写明状态、优先级、版本与兼容约定。
+- README 补充 Firefox 已知问题：点击通知不跳转（Firefox 系统通知中心行为，插件无法修复），
+  手动把 `alerts.useSystemBackend.windows.notificationserver.enabled` 设为 `false` 缓解。
+
+### 非灯逻辑审计与并发/异步改进
+
+- **Linux 点击通知修复**：`xdg-desktop-portal` OpenURI 的 `ssa{sv}` 编组对齐错误
+  （dict entry 未 8 对齐，严格实现会拒收）→ 已在同一 writer 内对齐并加单测。
+- `/dnotify/*` body 读取加上限（超限回 400）、`lastSwReport` 改白名单+截断、日志单条截断、
+  filelog 队列加**字节上限**（原来是条数上限，挡不住 MB 级单行）。
+- 点击协议注册：只在 `launchMode === 'protocol'` 时注册，并改用 koffi 直写注册表
+  （去掉每次 apply 串行 6 个 `spawnSync('reg')`）；删除"已移除协议"的过期注释。
+- 通知发送：真实平台后端（WinRT 同步 COM）改为 `setImmediate` 投递，不再阻塞事件回调；
+  图标路径按主题缓存（通知热路径不再 `existsSync`）。
+- SSE 连接加硬上限（`/events` 32、`/led-events` 8，超限 503）；实现原来只写注释的
+  `ledEventStreams` 计数。
+- 定时任务快照 `sync()` 改单飞（事件密集时不再互相覆盖 `known`）；D-Bus 待发队列满时
+  不再静默丢；认证缓冲加 8KB 上限；`Reader` 字符串/签名解码加越界检查。
+- 主题读取超时定时器 `unref`；`nudgeLed` 无灯时不再排定时器且卸载时清理；
+  `shownPending` 淘汰/结算时取消兜底定时器；通知 id 不再生成两次（诊断可对上）。
+- 浏览器半区：`fetch` 加 5s 超时、`form.set` 拒绝不再 unhandled、一次性定时器自摘除、
+  权限 `onchange` 与 SW 晚到回调加卸载守卫；`assistant/message` 摘要只扫到 220 字符。
+- 后端动态 import 失败时降级（不再让整个插件模块加载失败）；配置类型表改用 `hasOwn`
+  （防 `__proto__` 原型键）。
+- **审计"可延后"项同批完成**：`PageRegistry` 加 `maxPages=64` 硬上限（有活跃 SSE 的页面
+  绝不被误删，宁可暂时超限）；SW `activate` 时清理 7 天前的 pageId→clientId 映射与失效内存键；
+  `agents.roots()` 加 400ms 短缓存、任务摘要只记根会话并刷新 LRU 顺序；审批配对被有界容器
+  淘汰时改用通用文案推送（不再静默丢）；灯状态端点复用上一拍判定快照（卡顿哨兵不再触发
+  `evaluateAll`）；D-Bus `Reader.array` 加越界检查；修正 `lifecycle.ts` 两处缩进。
+
+## [2.3.0] - 2026-10-20
+
+### 灯的运行时迁移到独立 worker：主线程卡顿不再影响灯
+
+- **主线程只剩"采样 → 判定 → 下发语义画面"**：240fps 帧循环、渲染/交叉渐变、自检动画、
+  熄灯淡出、蜂鸣排队、串口链路管理全部搬进 `led-runtime-worker`（再往下才是原生串口 worker）。
+  主线程 `applyScene()` 同画面 0.097µs（签名去重后才 postMessage）、`status()` 读缓存 0.004µs；
+  主线程事件循环卡顿/GC **不会让灯掉帧**，灯侧阻塞/崩溃也只影响灯 worker。
+- **故障隔离与回退**：worker 崩溃/退出 → 状态置 error + 5s 退避自动重启（stop 后不再重启）；
+  新建失败 / 起不来回退 inline 运行时并打日志；`DSH_LED_RUNTIME=inline` 可强制旧路径排障。
+- **退出路径**：唯一允许主线程同步等待的地方 —— 发 `shutdown`（SharedArrayBuffer + Atomics），
+  最多等 1200ms 让 worker 自己完成同步淡出→全黑→close；典型 <150ms。
+- 新增 `src/led-runtime.ts` / `src/led-runtime-worker.ts` / `src/led-runtime-bridge.ts`；
+  `led-controller.ts` 相应删掉时间驱动部分（帧循环/自检/fadeOut/直连 link）。
+- **现场诊断结论**（用户报"卡顿更明显"）：主线程实测 `frameMaxMs ≤ 0.1ms`、`sampleMaxMs ≈ 2.5ms`，
+  但 `maxLateMs` 偶发 11–274ms —— 停顿来自灯之外（宿主 GC/其它会话负载），不是渲染慢；
+  独立 worker 后灯不再吃这些停顿。同时 `[mem]` 显示 **堆 337MB / 10 分钟、≈0KB/帧**（堆泄漏已修）。
+
+### 串口配置：手动端口支持英文逗号分隔多个
+
+- `COM5,COM9` → 只驱动这两块（各自独立链路、互不影响）；
+  `/dev/ttyUSB0,/dev/ttyUSB1` 同理。
+- 写了 `auto`（如 `auto,COM5`）→ **整体按 auto**（auto 已包含所有灯，其余项忽略）。
+- 空项/非法项丢弃、重复项去重；全非法退回 auto（不把灯钉死在死端口）；
+  手动端口之间改列表只增删变化的端口，保留的口不重连（不闪灯）。
+- 设置页串口说明加括号并注明"多个用英文逗号分隔"。
+
+### 设置页：删掉两处条件提示文字
+
+- 「指示灯状态」下方可能出现的原因说明、以及「点击测试」下方可能出现的"未连接"提示，
+  按要求**全部删除**（原因仍进日志/诊断端点）。
+- 新增公共 `useMenuDismiss`（点外面/Esc 收起、焦点回触发钮、禁用自动收起）。
+
+### 日志与诊断
+
+- **日志全异步**：`filelog` 改为内存队列 + `fs.promises` 批量落盘（原来每条 `appendFileSync`
+  都在主线程同步写盘，debug 打开时是卡顿/帧抖的一个来源）；队列有上限、轮转仍保留。
+- `job settled` 日志里超长的命令 label 截断到 160 字符（不再把几 KB 的 PowerShell 命令写进日志）。
+- 新增 `[led-perf]` 实时采集（仅 debug，每 10s）：`fps / idle / skipped / maxLate / frameMax /
+  sampleMax / boards / link / sent / drop / heap` —— 一眼分清"灯渲染慢"还是"主线程被卡住"。
+
+### 修复：切标签页/切应用时灯的严重闪烁（焦点门控误判为"新画面"）
+
+- **根因**：页面聚焦状态翻转会让 judge 给 `running` 画面打/去 `MUTED` 标记。链路层旧判据
+  用完整 `state|flags` 当"画面变了" → 重置 `sceneSince`（彗星相位回到起点、逐灯 stagger
+  重新展开）并叠 250ms 交叉渐变。切一次标签页/应用就闪一次，连续切就严重闪烁。
+- **修复**：新增 `sceneVisualKey()`，只用**真正会改变像素**的位（ATTENTION / NIGHT / waiting
+  的 MUTED；running/done/error 的 MUTED 不参与渲染）。只改语义不改像素的画面变化不再重置
+  相位/触发渐变。回归测试覆盖 `running→running+muted` 不重置、`waiting→waiting+muted` 仍渐变。
+- 顺带修：`wake()` 以前只在空闲节拍生效 → preview/点击测试要等下一拍；现在任何画面变化都
+  立刻渲染一帧。测试夹具也补上"每次 VERIFY 都回包"（否则重连后夹具自己把链路卡在 verifying）。
+
+### 稳态动画不再做时间抖动（彗星到两端时的 240Hz 微闪）
+
+- 旧实现每帧对 running/waiting 做 ±1 LSB 时间抖动；彗星到达两端时速度≈0，同一颗灯的
+  目标值连续多帧不变，抖动让它每帧在两个相邻灰度间来回跳 → 极快微闪。
+- 量化：2400 帧里逐通道"±1 来回跳"次数，原始渲染 **4** 次，加抖动后 **16264** 次。
+- 现在抖动只保留在 250ms 交叉渐变窗口（画面快速变化、抖动被运动掩盖）；稳态输出纯 8 位。
+  回归测试断言稳态帧逐字节等于渲染器输出、且来回跳次数 ≤20。
+
+### 无固件改动的"状态级校验 + 自适应冗余"（应对掉帧/接触不良）
+
+- 固件颜色 payload 定长 21B、**没有逐帧 ACK/CRC** → 不改固件无法做线缆级压缩/逐帧校验/重传。
+  能做的是"状态级韧性"：每帧都是绝对状态，丢帧下一帧自动纠正。
+- **自适应双发冗余**：10s 质量窗口内出现持续丢帧/写失败/探测超时/重连 → 判 `suspect/bad`，
+  保持 10s：唯一帧降到 **120fps**，每帧**连写两份**（第二份必达；`pending===0` 才补，
+  背压优先）。线上占用仍 ≈54.2%，不额外带宽；单帧丢失时另一份 2.26ms 后补上。
+  单帧偶发丢**不算**劣化（避免"丢帧→双发→更积压→更多丢帧"自维持循环）。
+- **快速健康探针**：劣化期 0x00 验证帧 2500/1200ms → 800/400ms（≈0.05% 带宽），
+  reap 看门狗 1000ms → 250ms；掉线判定最坏 ~2.2s → **~0.65s**。
+- **坏帧重试**：短写/0 字节不推进发送快照，下一拍自动重发；瞬时首次写失败不再发黑帧
+  （只有确认断开或 5s 内重复失败才黑），避免接触不良时闪黑。
+- 仍做不到：压缩、逐帧 CRC、ACK/选择性重传、设备端丢帧统计。若改固件的最小协议见
+  `docs/serial-protocol.md`（seq+CRC+ACK 或 0x00 回包带丢帧计数）。
+
+### 串口说明文案
+
+- 改为：`（默认auto = 自动模式，也可手动填写 COM 或 /dev/ttyUSB 等，可使用多个英文逗号分隔多选）`。
+
+## [2.2.0] - 2026-10-20
+
+### 稳定性（OOM 根因方向）：帧循环不再每帧创建宿主定时器
+
+- **证据**（崩溃进程的 2.58GB heap snapshot）：21 分钟里留存 **318,031 个 `Timeout` +
+  319,891 个 `Error` + 6.1M closures + 3.5M `system/Context`**；`Timeout` 数 ≈ 240/s × 21min，
+  与帧循环"每帧一次 `ctx.timeout`"完全吻合（cordis 的 timer 服务每次调用都会 `ctx.effect()`
+  注册一棵 effect 对象树）。多处采样点还显示堆/帧 ≈ **7KB/帧**（3768MB / 545612 帧等），
+  最终撞上 Node 4GB 堆上限（Mark-Compact 反复无效）。
+- **修复**：帧调度**只使用进程级 `setTimeout`**（`options.schedule` 仅测试注入），
+  `stop()` 与插件卸载时 `clearTimeout`；全文件不再引用 `ctx.timeout`（1.5s 采样仍用
+  `ctx.interval`，单次 effect）。**按需帧循环**：动画/渐变/自检/握手时 4.1667ms，
+  off / 稳态 done 降到 **250ms/帧**（心跳、探测、重试保留），场景变化立即唤醒并同步出一帧。
+  空闲调度从 240 次/秒 → **约 4 次/秒**；300k 帧的分配微基准 GC 489 次 → **6 次**。
+- **诊断增强**：`[mem]` 看门狗新增"**每帧堆增量**"（`≈7KB/帧` 这类泄漏一眼可见），
+  堆增长异常时**打到终端**（不再只在 debug 文件里）；`stallProbe` 只在调试模式取
+  `status()`（卡顿时不再加重主线程负担，且每 10s 一条）。
+- `nudgeLed` 采样自适应：采样自身耗时 > 8ms 时自动拉长去抖窗口（上限 1s），
+  事件风暴不会反过来压住帧循环。
+
+### 多灯同步：`auto` = 同时驱动所有应答的灯
+
+- 新增 `src/serial-fanout.ts`：每个端口一条**独立子链路**（独立 worker / 有界队列 / 重连），
+  一份画面广播给所有板子；`auto` 每 15s 重扫挂上新插入的灯，不应答的口冷却 30s，
+  已握手后掉线的板子由子链路自己退避重连（一块掉线不影响另一块）。
+- **手动填 `COMx` = 只驱动那一块**；`flush()/close()/beep/rawFrame/setOverride` 全部广播。
+- 多灯时每块各占 54.2% 带宽（互不共享）；`status()` 聚合为"至少一块就绪即 ready"，
+  额外给出 `boards` / `boardCount` / `verifiedCount`。
+- 顺带修掉"多串口逐个握手"里选错口死磕的问题（先前候选轮转已做，现在被扇出层取代）。
+
+### 串口 worker：零分配读取泵 + 自适应轮询
+
+- 读缓冲 256B、"已读字节数"、"已写字节数"改为**模块级预分配复用**，空转轮次 0 分配；
+  `listPorts` 的枚举缓冲也提出循环。
+- 读取泵自适应：打开端口后 / 写出验证帧后 **2ms** 快轮询 2s，其余 **30ms**；
+  收到任意数据立即降速。180 万次/小时的 syscall → 约 12 万次/小时（约 -93%），
+  最坏（回包一直不来）也比旧行为少约 20%。同轮次微基准 CPU 约 25~30× 下降。
+- 读失败只报一次并停泵（旧实现每 2ms 报一条，会灌爆故障链路）；`reportFault` 单 worker 只报一次；
+  `close()` 清空 pending；POSIX 读复用缓冲。
+
+### LED 渲染与采样
+
+- `led-render.ts` 增加就地渲染/混合/抖动入口（`createPixelFrame` + `*Into`），
+  `led-protocol.ts` 增加 `encodeLedsInto`；`serial-link.ts` 每帧走复用缓冲 —— 像素输出逐字节不变，
+  300k 帧的 GC 次数从 489 降到 6。
+- 采样遍历去重：每拍只调一次 `agents.list()`，建一次"会话→根 / 父→子代理 / 根→族"索引，
+  `collectFacts` / 族提问扫描 / hasWork 共用；`ledger.evaluateAll()` 每拍只算一次。
+  修复多根会话时的 O(roots×agents) 采样开销（它会拖慢 240fps 帧循环）。
+- `status().frames` 增加 `idle / idleFrameMs / maxLateMs / frameMaxMs / sampleMaxMs`
+  （"卡顿是掉帧还是采样拖慢"一眼可见）。
+- 「聚焦跟踪持续提醒」改为**始终开启**：设置页删掉该开关行，旧的 `ledAttention` 配置字段
+  仅保留兼容（不再参与判定）。
+
+### 设置页
+
+- 修「各预设推送」静默模式下拉**选中项勾号缺失**：`SilenceMenu → MenuItem` 漏传
+  `selected` / `value` 两个 prop。
+- 菜单公共逻辑抽成 `useMenuDismiss`：点外面 / **Esc** 收起、Esc 后焦点回触发钮、禁用自动收起，
+  成对挂载/摘除全局监听；`noSession` 的提前 return 移到所有 hooks 之后（避免 hooks 数量不一致）。
+- 菜单项改 `role="menuitemradio"` + `aria-checked`，浮层加 `aria-label`。
+
+### 通知点击与延迟
+
+- **修点击跳转的 401**（"dsh web authentication required…"）：深链（`/#dsh-notify=…`）
+  现在经 `ctx.get('connection').authenticatedUrl()` 带上 DSH 进程启动令牌，
+  `/dnotify/click` 的 302、`/dnotify/activate` 的 open-*、浏览器通知的 deepLink 统一走这一处；
+  无该服务（老宿主/精简组合）时保持原行为。
+- **修 PowerShell 命令注入**：自定义协议转发器不再把 `%1` 拼进 `-Command` 的脚本文本，
+  改为固定脚本 `assets/dsh-notify-click.ps1`（`-File`，URI 只作 `$args[0]`），脚本内按
+  `none/session/page/url` 白名单 + 长度/控制字符校验；端点等作为注册表数据值读取；
+  脚本缺失时不注册（不留必然失败的处理器）。`package.json` 纳入 `assets/*.ps1`，
+  `check-syntax.mjs` 的 BOM 检查扩展到 assets。
+- **完成通知去抖 3s → 800ms**：灯是事件即时亮的，通知不该慢 3 秒；根 agent 再次 running 仍会取消。
+
+### 文档与工程
+
+- `tsconfig` strict/include 纳入 `serial-pump.ts`、`serial-fanout.ts`。
+- 新增 `scripts/locked.mjs`（开发用构建互斥，多个会话/Agent 并行跑 `npm test` 时不再互踩）。
+- 文档对齐：多灯同步、心跳 1s、读取泵自适应、帧循环按需、蜂鸣频率、
+  兼容范围 `>=0.2.0-rc.2 <=0.2.1-rc.2`。
+
 ## [2.1.4] - 2026-10-19
 
 ### 帧率与背压：把"240fps"从注释变成实测

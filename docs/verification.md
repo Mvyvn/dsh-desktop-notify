@@ -9,7 +9,7 @@
 | 步骤 | 覆盖什么 |
 | --- | --- |
 | `npm ci --ignore-scripts` | 依赖可安装（含 koffi 的平台预编译包）；不需要原生构建 |
-| `npm run check` | 每个 `lib/*.js` 的语法 + 仓内 `.ps1` 的 UTF-8 BOM（当前仓库没有 `.ps1`，规则保留） |
+| `npm run check` | 每个 `lib/*.js` 的语法 + 仓内 `.ps1` 的 UTF-8 BOM（当前剩点击转发器与 restart-web 两个脚本） |
 | `npm test` | `pretest` 先构建（三个 tsconfig）→ 全部单测：宿主事件流、门控、公开 API、D-Bus 编组、主题判定、图标、状态容器、客户端半区、**常驻句柄不钉住事件循环** |
 | `git diff --exit-code -- lib` | `lib/` 与 `src/` 一致：改了源码却忘记提交产物会在这里失败 |
 | `node scripts/theme-probe.mjs` | 主题探测在 Linux 路径下不炸（无桌面总线时也不炸） |

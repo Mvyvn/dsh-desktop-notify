@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PageRegistry, pickDeliveryPage } from '../lib/pages.js'
-import { planActivation, planOpensWindow } from '../lib/activation.js'
+import { clickProtocolCommand, planActivation, planOpensWindow } from '../lib/activation.js'
 import { clickNone, clickSession, clickUrl, clickPage } from '../lib/protocol.js'
 
 const T = 1_000_000
@@ -91,4 +91,19 @@ test('激活决策：三态互斥且可证明', () => {
   assert.deepEqual(planActivation(clickUrl('https://example.com/x'), ctx), { action: 'open-url', url: 'https://example.com/x' })
   // page 目标同样遵循三态
   assert.equal(planActivation(clickPage('plugins'), ctx).action, 'deliver')
+})
+
+test('自定义协议注册命令：URI 只以 "%1" 独立参数出现（不能拼进脚本文本）', () => {
+  const scriptPath = 'C:\\Program Files\\DSH\\assets\\dsh-notify-click.ps1'
+  const command = clickProtocolCommand(scriptPath)
+  assert.equal(
+    command,
+    'powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass'
+      + ' -File "C:\\Program Files\\DSH\\assets\\dsh-notify-click.ps1" "%1"',
+  )
+  // 系统传入的 URI 只能通过这个独立参数进入转发脚本；出现多次 = 又被拼到了别处。
+  assert.equal((command.match(/%1/g) || []).length, 1, '%1 只能出现一次')
+  assert.ok(command.endsWith('"%1"'), '命令必须以带引号的 "%1" 独立参数结尾')
+  assert.ok(!/-Command\b/.test(command), '-Command 会把后续参数拼回脚本文本，不能用')
+  assert.ok(!command.includes('$raw'), '命令里不能出现脚本文本')
 })

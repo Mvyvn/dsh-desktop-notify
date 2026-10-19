@@ -3,7 +3,7 @@
 //   npm test
 //
 // 覆盖（每一条都对应一个真实契约，见 DSH 源码）：
-//   · agent/status {agent,status}：仅根 agent 的 idle 触发，3s 去抖后带回复摘要
+//   · agent/status {agent,status}：仅根 agent 的 idle 触发，800ms 去抖后带回复摘要
 //   · session/event approval/asked+decided（outcome 'rejected'）→ 审批被拒通知
 //   · tools/execute waterfall：ask_user_question 派发 → 等待输入通知，且必须 next()
 //   · subagent/end {id} → 后台子代理结束（会话归属 = 主会话 + 子会话）
@@ -16,7 +16,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { apply, inject as declaredInject } from '../lib/index.js'
+
+/** 仓库根：协议转发脚本等资产直接按路径读（静态自检）。 */
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 造一个够用的假 cordis ctx：事件总线 + 定时器 + 服务表 + rpc + inject。 */
 function harness(options = {}) {
@@ -134,6 +140,9 @@ function harness(options = {}) {
   let admitRejection = undefined
   services.connection = {
     admit: () => (admitRejection === undefined ? { peer: { id: 'probe' } } : { rejection: admitRejection }),
+    // 真实 HostConnectionService 还有 authenticatedUrl()（把进程启动令牌加进 URL）；
+    // 默认故意不提供，覆盖"老宿主/没有该能力时保持原样"的回退路径。
+    ...(options.connection || {}),
   }
   function bind(scope, allowed) {
     for (const name of allowed) {
@@ -260,7 +269,9 @@ function harness(options = {}) {
 /** apply 一份插件并等 fs.resolve 那个微任务落地。 */
 async function start(options = {}) {
   const h = harness(options)
-  let config = { debug: false, sender: (item) => { h.sent.push(item) } }
+  // 测试**不碰真实注册表**：apply() 会调 winrt 的 registerClickProtocol 写 HKCU，
+  // 这里统一关掉（协议命令的形状由 activation.test.mjs 的纯函数/资产自检覆盖）。
+  let config = { debug: false, clickProtocol: false, sender: (item) => { h.sent.push(item) } }
   if (options.config) config = { ...config, ...options.config }
   apply(h.ctx, config)
   await Promise.resolve()
@@ -286,7 +297,37 @@ const settleStartup = () => new Promise((resolve) => setTimeout(resolve, 450))
 
 const ROOT_AGENT = { id: 's1', session: { id: 's1', title: '会话一', header: { cwd: 'D:\\ws\\proj' } } }
 
-test('根 agent 空闲 3s 后弹出"任务完成"，带工作区/会话前缀与回复摘要', async () => {
+test('会话终止：turn/end aborted(user) → 红色终止通知，且不再弹任务完成', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  h.emit('session/event', ROOT_AGENT.session, {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: '半截输出' }] } },
+  })
+  h.emit('session/event', ROOT_AGENT.session, {
+    type: 'turn/end',
+    data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } },
+  })
+  h.emit('agent/status', { agent: ROOT_AGENT, status: 'idle' })
+  h.advance(1000)
+  assert.equal(h.sent.length, 1, '终止后 800ms 的 idle 不得再发任务完成')
+  assert.equal(h.sent[0].title, '⛔ DSH 会话终止')
+  assert.equal(h.sent[0].message, 'proj/会话一:用户中止')
+  assert.equal(h.sent[0].click.wire, 'session:s1')
+})
+
+test('会话终止：turn/end error（模型断链）→ 通知带错误原因', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  h.emit('session/event', ROOT_AGENT.session, {
+    type: 'turn/end',
+    data: { turn: 2, reason: { kind: 'error', error: { code: 'NETWORK', message: '连接被对端重置' } } },
+  })
+  h.advance(500)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].title, '⛔ DSH 会话终止')
+  assert.equal(h.sent[0].message, 'proj/会话一:出错：连接被对端重置')
+})
+
+test('根 agent 空闲 800ms 后弹出"任务完成"，带工作区/会话前缀与回复摘要', async () => {
   const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
   h.emit('session/event', ROOT_AGENT.session, {
     type: 'assistant/message',
@@ -296,11 +337,31 @@ test('根 agent 空闲 3s 后弹出"任务完成"，带工作区/会话前缀与
   h.advance(1000)
   assert.deepEqual(h.sent, [], '运行中不通知')
   h.emit('agent/status', { agent: ROOT_AGENT, status: 'idle' })
-  h.advance(3000)
+  // 去抖期：灯带是事件即时，通知只等 800ms（原来是 3000ms），别再退回"慢半拍"。
+  h.advance(799)
+  assert.deepEqual(h.sent, [], '800ms 去抖期内不通知（agent 可能马上又 running）')
+  h.advance(1)
   assert.equal(h.sent.length, 1)
   assert.equal(h.sent[0].title, '✅ DSH 任务完成')
   assert.equal(h.sent[0].message, 'proj/会话一:改好了 三个文件')
   assert.equal(h.sent[0].urgency, 'low')
+})
+
+test('去抖期内 agent 重新 running：取消完成通知，下次 idle 仍能正常提醒', async () => {
+  const h = await start({ roots: [ROOT_AGENT], sessions: { s1: ROOT_AGENT.session } })
+  h.emit('session/event', ROOT_AGENT.session, {
+    type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '第一轮' }] } },
+  })
+  h.emit('agent/status', { agent: ROOT_AGENT, status: 'idle' })
+  h.advance(400)
+  h.emit('agent/status', { agent: ROOT_AGENT, status: 'running' })
+  h.advance(2000)
+  assert.deepEqual(h.sent, [], '又跑起来了：这轮不算完成')
+  // 摘要没被消费掉：真正 idle 后仍然要能提醒（取消只撤销定时器，不丢内容）
+  h.emit('agent/status', { agent: ROOT_AGENT, status: 'idle' })
+  h.advance(800)
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0].message, /第一轮/)
 })
 
 test('子代理的 idle 不触发任务完成通知', async () => {
@@ -316,7 +377,11 @@ test('正在看的会话被静默，其它会话照常弹', async () => {
   const h = await start({ roots: [ROOT_AGENT, other], sessions: { s1: ROOT_AGENT.session } })
   const focus = await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, pageId: 'p1', sessionId: 's1' } })
   assert.equal(focus.status, 200)
-  assert.deepEqual(JSON.parse(focus.body), { ok: true, pages: 1, verdict: 'accepted' })
+  const focusBody = JSON.parse(focus.body)
+  assert.equal(focusBody.ok, true)
+  assert.equal(focusBody.pages, 1)
+  assert.equal(focusBody.verdict, 'accepted')
+  if (focusBody.focusUrl !== undefined) assert.match(String(focusBody.focusUrl), /\/dnotify\/focus\?t=/, '可选：给页面下发前台激活地址')
 
   h.emit('session/event', ROOT_AGENT.session, {
     type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'A 完成' }] } },
@@ -411,12 +476,144 @@ test('点击三态③：没有可投递页面 → 302 到 DSH 深链（由浏览
   assert.ok(!/event: navigate/.test(late.res.chunks.join('')), '不该重放')
 })
 
+test('深链带 DSH 启动令牌：新浏览器/桌面端点击不再被 401 拦下', async () => {
+  // 真实 HostConnectionService.authenticatedUrl() 就是"给 URL 加 ?token=<进程启动令牌>"。
+  // DSH 的 / 在带令牌时先换 cookie 再 303；没有令牌且没有 cookie 时直接 401
+  // （"dsh web authentication required; reopen the URL printed by dsh web."）。
+  const h = await start({
+    roots: [ROOT_AGENT],
+    connection: {
+      authenticatedUrl: (baseUrl) => {
+        const url = new URL(baseUrl)
+        url.searchParams.set('token', 'launch-token-1')
+        return url.href
+      },
+    },
+  })
+  const token = globalThis.__dshDesktopNotifyClickToken
+  const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${token}&raw=${encodeURIComponent('session:s1')}` })
+  assert.equal(click.status, 302)
+  const location = new URL(String(click.headers.location))
+  assert.equal(location.origin, 'http://127.0.0.1:3080')
+  assert.equal(location.searchParams.get('token'), 'launch-token-1', '点击 302 的 location 必须带启动令牌')
+  assert.equal(location.hash, '#dsh-notify=session%3As1', 'hash 深链在加令牌后保持原样')
+  // /activate 的 open 出口（本机转发器/桌面端打开）走同一个函数，也必须带令牌
+  const activate = JSON.parse((await h.request({ method: 'GET', url: `/dnotify/activate?t=${token}&raw=${encodeURIComponent('session:s1')}` })).body)
+  assert.equal(activate.action, 'open')
+  const openUrl = new URL(activate.url)
+  assert.equal(openUrl.searchParams.get('token'), 'launch-token-1', '/activate 返回的 open url 必须带启动令牌')
+  assert.equal(openUrl.hash, '#dsh-notify=session%3As1')
+})
+
+test('浏览器通知的 deepLink 也带启动令牌（SW 找不到窗口时新开不再 401）', async () => {
+  const h = await start({
+    roots: [ROOT_AGENT],
+    connection: {
+      authenticatedUrl: (baseUrl) => {
+        const url = new URL(baseUrl)
+        url.searchParams.set('token', 'launch-token-2')
+        return url.href
+      },
+    },
+  })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
+  h.services.desktopNotify.pushAlways({ title: '带令牌', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  const chunk = stream.res.chunks.join('')
+  assert.match(chunk, /event: notify/)
+  assert.match(chunk, /token=launch-token-2/, 'SW 的 deepLink 必须带启动令牌')
+  assert.match(chunk, /#dsh-notify=session%3As1/)
+})
+
+test('没有点击目标的通知不带任何 target/deepLink/focusUrl（源头就没有点击动作）', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
+  // 不传 click = none：只能提示，点击不能跳转、不能抢前台。
+  h.services.desktopNotify.pushAlways({ title: '只提示，不跳转' })
+  h.advance(600)
+  const chunk = stream.res.chunks.join('')
+  const dataLine = chunk.split('\n').find((line) => line.indexOf('data: ') === 0)
+  assert.ok(dataLine, '应收到一条 notify 事件')
+  const envelope = JSON.parse(dataLine.slice('data: '.length))
+  assert.equal(envelope.title, '只提示，不跳转')
+  assert.equal(envelope.target, undefined, 'none 通知不下发 target')
+  assert.equal(envelope.deepLink, undefined, 'none 通知不下发 deepLink')
+  assert.equal(envelope.focusUrl, undefined, 'none 通知不下发 focusUrl（不请求前台）')
+  assert.equal(envelope.tag, envelope.id, 'tag 仍复用通知 id（显示回执键）')
+})
+
+test('可点击通知仍下发 target/deepLink/focusUrl（点击链路不回归）', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
+  await h.request({ method: 'POST', url: '/dnotify/page-focus', body: { focused: true, seq: 1, pageId: 'p1', sessionId: 's1', permission: 'granted' } })
+  h.services.desktopNotify.pushAlways({ title: '可点击', click: { type: 'session', sessionId: 's1' } })
+  h.advance(600)
+  const chunk = stream.res.chunks.join('')
+  const dataLine = chunk.split('\n').find((line) => line.indexOf('data: ') === 0)
+  assert.ok(dataLine, '应收到一条 notify 事件')
+  const envelope = JSON.parse(dataLine.slice('data: '.length))
+  assert.equal(envelope.target, 'session:s1')
+  assert.match(String(envelope.deepLink || ''), /#dsh-notify=session%3As1/)
+  assert.match(String(envelope.focusUrl || ''), /\/dnotify\/focus\?t=/, '点击后页面应能请求宿主前台')
+})
+
+test('没有鉴权包装能力时深链保持原样（老宿主/精简组合不回归）', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const token = globalThis.__dshDesktopNotifyClickToken
+  const expected = 'http://127.0.0.1:3080/#dsh-notify=session%3As1'
+  // ① connection 服务在、但没有 authenticatedUrl（新宿主的旧形状/测试组合）
+  const plain = await h.request({ method: 'GET', url: `/dnotify/click?t=${token}&raw=${encodeURIComponent('session:s1')}` })
+  assert.equal(plain.status, 302)
+  assert.equal(plain.headers.location, expected)
+  // ② 连 connection 服务都没有：同样回退，不抛异常、不 500
+  delete h.services.connection
+  const noService = await h.request({ method: 'GET', url: `/dnotify/click?t=${token}&raw=${encodeURIComponent('session:s1')}` })
+  assert.equal(noService.status, 302)
+  assert.equal(noService.headers.location, expected)
+})
+
 test('url 目标：宿主直接给出外部地址（与 DSH 页面无关）', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
   const click = await h.request({ method: 'GET', url: `/dnotify/click?t=${globalThis.__dshDesktopNotifyClickToken}&raw=${encodeURIComponent('url:https%3A%2F%2Fexample.com%2Fx')}` })
   assert.equal(click.status, 302)
   assert.equal(click.headers.location, 'https://example.com/x')
+})
+
+test('点击协议转发脚本：URI 只作参数、白名单严格、BOM 正确（静态自检）', () => {
+  const file = join(REPO_ROOT, 'assets', 'dsh-notify-click.ps1')
+  const bytes = readFileSync(file)
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'PowerShell 5.1 读中文脚本必须带 UTF-8 BOM')
+  const text = bytes.toString('utf8').replace(/^\uFEFF/, '')
+  // 只看代码行（注释里会解释旧实现/参数是什么，不代表实际行为）
+  const code = text.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')
+  // URI 只从系统给的独立参数取，绝不进入脚本文本（旧的 -Command 才会回拼成代码）
+  assert.match(code, /\$args\[0\]/, 'URI 必须从 $args[0] 取')
+  assert.ok(!code.includes('%1'), '脚本代码里不该出现注册表占位符 %1（它是系统展开的参数）')
+  assert.ok(!code.includes("$raw='%1'"), '旧实现的 $raw=\'%1\'（参数回拼）必须消失')
+  assert.ok(!/-Command\b/.test(code), '不能用 -Command（会把参数拼回脚本文本）')
+  assert.ok(!/Invoke-Expression/i.test(code), '绝不用 Invoke-Expression 执行外部数据')
+  assert.ok(!/Start-Process\s+\$wire/i.test(code), 'Start-Process 不能直接吃外部 wire')
+  // 白名单正则从脚本里提取：测的就是**实际生效**的那一条
+  const match = text.match(/^[ \t]*\$wirePattern = '(.+)'$/m)
+  assert.ok(match, '脚本必须声明 $wirePattern 白名单')
+  const wirePattern = new RegExp(match[1])
+  for (const good of ['none', 'session:s1', 'session:a.b-c_d:e', 'page:plugins', 'page:settings-plugins', 'url:https%3A%2F%2Fexample.com%2Fx']) {
+    assert.ok(wirePattern.test(good), `应接受合法 wire: ${good}`)
+  }
+  for (const bad of ['', 'session:', 'session:bad/id', 'page:evil', 'javascript:alert(1)', 'url:', 'session:' + 'x'.repeat(201), 'session:s1\u0000', 'Session:s1']) {
+    assert.ok(!wirePattern.test(bad), `应拒绝非法 wire: ${JSON.stringify(bad)}`)
+  }
+  // 长度上限与其它安全闸门（都是旧实现的既有行为，改造时不能丢）
+  assert.match(code, /-gt \$maxUriLength/, '必须有 URI 长度上限')
+  assert.match(code, /\[\\x00-\\x1F\\x7F\]/, '必须拒绝控制字符')
+  assert.match(code, /Read-ActivateValue 'ActivateEndpoint'/, '端点必须来自注册表数据（命令里不拼端点）')
+  assert.match(code, /Invoke-RestMethod/, '必须请求激活端点')
+  assert.match(code, /AppActivate/, 'delivered 后仍要把浏览器带回前台（focusWindow 语义）')
+  assert.match(code, /dsh-notify-activate\.log/, '失败必须写日志')
+  assert.match(code, /FallbackBase/, '失败必须退回浏览器落地页')
 })
 
 test('点击落地页：跨站触发被拒（403），旧令牌仍放行（用户点旧通知）', async () => {
@@ -702,6 +899,20 @@ test('投递后没人认领 → 不静默失败，改成新开深链', async () 
   assert.match(String(openBody.url || ''), /#dsh-notify=/)
 })
 
+test('/focus：令牌保护，成功返回执行状态（windowFound/atFront/reason）', async () => {
+  const h = await start({ roots: [ROOT_AGENT] })
+  const bad = await h.request({ method: 'GET', url: '/dnotify/focus?t=wrong' })
+  assert.equal(bad.status, 403)
+  const ok = await h.request({ method: 'GET', url: '/dnotify/focus?t=' + globalThis.__dshDesktopNotifyClickToken })
+  assert.equal(ok.status, 200)
+  const body = JSON.parse(ok.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.accepted, true)
+  assert.equal(typeof body.windowFound, 'boolean')
+  assert.equal(typeof body.atFront, 'boolean')
+  assert.equal(typeof body.reason, 'string')
+})
+
 test('混合 backend 分流：页面在线且权限 granted → 浏览器通知；否则原生 Toast + 降级提示', async () => {
   const h = await start({ roots: [ROOT_AGENT] })
   const stream = await h.request({ method: 'GET', url: '/dnotify/events?pageId=p1' })
@@ -788,7 +999,7 @@ test('LED 端点 /dnotify/led：设置页（浏览器鉴权放行）不带令牌
   assert.equal(res.status, 200)
   const body = JSON.parse(res.body)
   assert.equal(body.ok, true)
-  assert.equal(body.protocol, '2.0.0-led.2')
+  assert.equal(body.protocol, '1.1.0-led.3')
   assert.equal(body.enabled, false, '默认关闭（多数人机器上没有这块板子）')
   assert.equal(body.reason, 'disabled')
   assert.ok(Array.isArray(body.verdicts), '应回带每个会话的判定')
@@ -903,6 +1114,35 @@ test('subagent/end：按主会话回溯工作区与标题', async () => {
   assert.equal(h.sent.length, 1)
   assert.equal(h.sent[0].title, '🤖 DSH 后台子代理结束')
   assert.equal(h.sent[0].message, 'proj/会话一:子代理已完成')
+})
+
+test('subagent/end 非 completed：黄色子代理终止通知，正文带子代理名+原因', async () => {
+  const subSession = { id: 'child-1', title: '子代理', header: { parentSession: 's1' } }
+  const h = await start({ sessions: { s1: ROOT_AGENT.session, 'child-1': subSession } })
+  h.emit('subagent/end', { runId: 'run-2', provider: 'inproc', id: 'child-1', local: false, stopReason: 'error' })
+  h.advance(500)
+  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent[0].title, '⏹️ DSH 后台子代理终止')
+  assert.equal(h.sent[0].message, 'proj/会话一:子代理:出错')
+  assert.equal(h.sent[0].click.wire, 'session:s1')
+})
+
+test('subagent/end aborted（手动终止）：正文显示已终止，不留空白原因', async () => {
+  const subSession = { id: 'child-1', title: '子代理', header: { parentSession: 's1' } }
+  const h = await start({ sessions: { s1: ROOT_AGENT.session, 'child-1': subSession } })
+  h.emit('subagent/end', { runId: 'run-3', provider: 'inproc', id: 'child-1', local: false, stopReason: 'aborted' })
+  h.advance(500)
+  assert.equal(h.sent[0].title, '⏹️ DSH 后台子代理终止')
+  assert.equal(h.sent[0].message, 'proj/会话一:子代理:已终止')
+})
+
+test('subagent/end 缺少 stopReason：按终止处理，不误报完成，也不留空白原因', async () => {
+  const subSession = { id: 'child-1', title: '子代理', header: { parentSession: 's1' } }
+  const h = await start({ sessions: { s1: ROOT_AGENT.session, 'child-1': subSession } })
+  h.emit('subagent/end', { runId: 'run-4', provider: 'inproc', id: 'child-1', local: false })
+  h.advance(500)
+  assert.equal(h.sent[0].title, '⏹️ DSH 后台子代理终止')
+  assert.equal(h.sent[0].message, 'proj/会话一:子代理:未提供终止原因')
 })
 
 test('goal/changed：complete 与 block（blockedReason.message）', async () => {
@@ -1040,8 +1280,8 @@ test('对外 API：push 走门控并如实返回是否入队，pushAlways 绕过
 
   // 结构化明细：被静默 / 载荷无效 都能区分
   const detail = api.notify({ title: '结构化', sessionId: 's1' })
-  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
-  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload', apiVersion: '1.1.0-led.1', unsupportedVersion: false })
+  assert.deepEqual(detail, { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0', unsupportedVersion: false })
+  assert.deepEqual(api.notify({ title: '' }), { ok: false, queued: false, silenced: false, reason: 'invalid-payload', apiVersion: '1.1.0', unsupportedVersion: false })
 })
 
 test('jobs：kind=subagent 的 job 不再重复通知（subagent/end 已经报过）', async () => {

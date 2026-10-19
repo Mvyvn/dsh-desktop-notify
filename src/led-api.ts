@@ -19,19 +19,21 @@ import {
 import { LED_STATES, clampBrightness, type LedState } from './led-scene.js'
 
 /** 本分支的串口控制协议版本（与通知 API 版本分开标注）。 */
-export const LED_API_VERSION = '2.0.0-led.2'
+export const LED_API_VERSION = '1.1.0-led.3'
 
 /** LED 能力清单（只增不减）。 */
 export const LED_API_CAPABILITIES: readonly string[] = [
   'led.protocol.aisl',   // AI Status Lights 线协议（55 AA / MODE / 累加和 / BB）
   'led.pixels',          // 7 颗灯的像素（主机渲染后推流）
-  'led.scene',           // 语义状态（运行中/等你/完成/异常）
+  'led.scene',           // 语义状态（运行中/等待你/已完成/警告/异常）
+  'led.scene.warn',      // 黄色警告状态（v1.1.0 新增；旧调用方不受影响）
   'led.brightness',      // 亮度（主机端乘到通道上）
   'led.beep',            // 无源蜂鸣器（频率/音量/时长）
   'led.frame',           // 白名单原始帧（MODE 0x00/0x01/0x02）
   'led.ack',             // 解除提醒闩
   'led.preview',         // 手动点灯（诊断/bring-up）
   'led.status',          // 链路与判定状态
+  'led.host-only',       // 宿主事件（会话/目标/团队/后台任务）才自动驱动灯；外部推送不点灯
 ]
 
 /** 一次 LED 操作的结果。 */

@@ -244,7 +244,18 @@ function loadSettingsSection({ form, ledStatus } = {}) {
   const entry = registered.find((r) => r.meta && r.meta.name === 'plugins.row.config')
   assert.ok(entry, '设置页必须注册到 plugins.row.config')
   assert.ok(styles.length > 0, '设置页应当注入自己的样式')
-  return { Section: entry.component, mini, registered, document, ctx, styles, apply: exports.apply, fetches, moduleId: registration.id, moduleName: exports.name }
+  return {
+    Section: entry.component, mini, registered, document, ctx, styles, apply: exports.apply, fetches,
+    moduleId: registration.id, moduleName: exports.name,
+    /** 派发 document/window 事件（菜单开合、全局监听清理之类的用例要用）。 */
+    dispatch(target, type, event) {
+      for (const fn of [...(listeners.get(target + ':' + type) || [])]) fn(event || { type })
+    },
+    /** 当前挂在某个 target+type 上的监听器数量。 */
+    listenerCount(target, type) {
+      return (listeners.get(target + ':' + type) || new Set()).size
+    },
+  }
 }
 
 test('护栏存在的理由：带 hooks 的组件不能被当普通函数调用', () => {
@@ -271,9 +282,13 @@ test('串口那行的说明与标签左右排（不再另起一行），指示�
   mini.render(mini.React.createElement(Section, null))
   const tree = mini.render(mini.React.createElement(Section, null))
 
-  // 标签与说明同一个横向 flex 容器（而不是上下两行）
-  const hintNode = findAll(tree, (n) => n.props && Array.isArray(n.children) && typeof n.children[0] === 'string' && n.children[0].startsWith('auto = 自动模式'))
-  assert.equal(hintNode.length, 1, '串口说明应当渲染出来')
+  // 标签与说明同一个横向 flex 容器（而不是上下两行）；说明文字整体加括号（用户要求）
+  const hintNode = findAll(tree, (n) => n.props && Array.isArray(n.children) && typeof n.children[0] === 'string' && n.children[0].startsWith('（默认auto = 自动模式'))
+  assert.equal(hintNode.length, 1, '串口说明应当渲染出来（且整体带括号）')
+  assert.equal(hintNode[0].children[0].endsWith('）'), true, '串口说明应当以右括号结尾')
+  assert.match(hintNode[0].children[0], /COM/)
+  assert.match(hintNode[0].children[0], /\/dev\/ttyUSB/)
+  assert.match(hintNode[0].children[0], /英文逗号/, '多个端口要用英文逗号分隔（说明里要写出来）')
   const inlineParents = findAll(tree, (n) => n.props && n.props.style && n.props.style.flexDirection === 'row' &&
     Array.isArray(n.children) && n.children.some((child) => child && child.children && child.children[0] === '串口'))
   assert.equal(inlineParents.length >= 1, true, '串口的说明应与标签放在同一行（flexDirection: row）')
@@ -281,6 +296,12 @@ test('串口那行的说明与标签左右排（不再另起一行），指示�
   // 状态行容器要有额外下间距（把状态块与下面的开关行分开）
   const statusBlock = findAll(tree, (n) => n.props && n.props.style && n.props.style.paddingBottom === '14px')
   assert.equal(statusBlock.length >= 1, true, '指示灯状态块应当有额外下间距')
+})
+
+test('指示灯卡片：不再渲染任何条件提示文字（状态详情 / 点击测试失败提示）', () => {
+  // 用户要求：这两处下方"可能出现的额外提示文字"全部删除
+  assert.equal(/view\.detail/.test(CLIENT_SOURCE), false, '状态行下方的条件详情不该再渲染')
+  assert.equal(/tipText|setTip/.test(CLIENT_SOURCE), false, '点击测试下方的条件提示不该再渲染')
 })
 
 test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须保持一致（否则整棵设置树被打崩）', () => {
@@ -316,9 +337,11 @@ test('设置页：配置从"未就绪"过渡到"就绪"时，hook 数量必须�
   const words = texts(tree).join('|')
   // 想看最终文案长什么样：DSH_NOTIFY_DUMP_SETTINGS=1 node --test tests/client-settings.test.mjs
   if (process.env.DSH_NOTIFY_DUMP_SETTINGS) console.log('[设置页文案] ' + words.split('|').join(' / '))
-  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '亮度（%）', '启用状态指示蜂鸣器', '聚焦跟踪持续提醒', '各预设推送']) {
+  for (const label of ['桌面通知', '指示灯', '启用任务状态指示灯', '串口', '亮度（%）', '启用状态指示蜂鸣器', '各预设推送']) {
     assert.ok(words.includes(label), `设置页应当渲染出「${label}」，实际文本：${words.slice(0, 240)}`)
   }
+  // 「聚焦跟踪持续提醒」这一行已删除（能力改为始终开启），宿主侧字段仍保留以兼容旧配置
+  assert.equal(words.includes('聚焦跟踪持续提醒'), false, '「聚焦跟踪持续提醒」不该再渲染成设置行')
   // 用户明确要求：删掉的部分就是"不需要第二行字" —— 这些说明文案不许再出现
   for (const gone of ['USB 转串口的彩色灯珠', '115200 足够', '躺床上', '自上次聚焦后', '255 是']) {
     assert.equal(words.includes(gone), false, `不该再渲染说明文字「${gone}」`)
@@ -377,7 +400,7 @@ test('行标题格式：一律用标准设置字段的 13px / 字重 500（删�
     assert.equal(hits.length >= 1, true, `应当渲染出标题「${text}」`)
     return hits[0].props.style
   }
-  for (const text of ['启用任务状态指示灯', '聚焦跟踪持续提醒', '亮度（%）', '启用状态指示蜂鸣器', '串口']) {
+  for (const text of ['启用任务状态指示灯', '亮度（%）', '启用状态指示蜂鸣器', '串口']) {
     assert.equal(labelOf(text).fontSize, '13px', `「${text}」应当用标准字段字号`)
     assert.equal(labelOf(text).fontWeight, 500, `「${text}」应当加粗（标准字段字重）`)
   }
@@ -421,7 +444,8 @@ test('指示灯状态：没插设备 → "未连接"（不是"异常"），且�
   await flush()              //    等轮询的 promise 落地
   const words = texts(mini.render(el())).join('|')   // 3) 状态已就绪
   assert.ok(words.includes('指示灯状态：未连接'), `没插设备应是"未连接"：${words.slice(0, 200)}`)
-  assert.ok(words.includes('没有找到串口设备'), '要说明原因（短句）')
+  // 用户要求：状态行下方不再出现任何条件说明文字（原因只进日志/诊断端点）
+  assert.equal(words.includes('没有找到串口设备'), false, '状态行下方不该再有额外提示文字')
   assert.equal(words.includes('指示灯状态：异常'), false, '没插设备不该报成异常（测试下拉里的「异常」是选项，不算）')
   assert.equal(words.includes('灯珠'), false, '连上后的端口/灯珠细节不该再出现')
 })
@@ -445,6 +469,46 @@ test('指示灯状态：功能没开 → "未启用"，且不显示"画面"', as
   const words = texts(mini.render(el())).join('|')
   assert.ok(words.includes('指示灯状态：未启用'))
   assert.equal(words.includes('画面：'), false, '没启用就别说画面')
+})
+
+test('指示灯状态：开关已关闭时，旧的"运行中"链路状态不能盖过「未启用」', async () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  // 场景 1：用户刚关掉开关，SSE 最后一条还是关闭前的 link=ready（旧实现会一直显示运行中）
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: false } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const { Section, mini } = loadSettingsSection({
+    form,
+    ledStatus: {
+      ok: true, reason: 'ok', enabled: true,
+      link: { state: 'ready', port: 'COM7', verified: true },
+      scene: { state: 'running', flags: 0 },
+    },
+  })
+  const el = () => mini.React.createElement(Section, null)
+  mini.render(el()); await flush()
+  mini.render(el()); await flush()
+  let words = texts(mini.render(el())).join('|')
+  assert.ok(words.includes('指示灯状态：未启用'), `本地开关关闭时必须显示「未启用」：${words.slice(0, 220)}`)
+  assert.equal(words.includes('指示灯状态：运行中'), false, '关闭后不能继续显示运行中')
+
+  // 场景 2：表单快照还没更新（ledEnabled=true），但宿主已回报 enabled=false/reason=disabled
+  const form2 = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types: [], ledEnabled: true } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const h2 = loadSettingsSection({
+    form: form2,
+    ledStatus: { ok: true, reason: 'disabled', enabled: false, link: { state: 'ready', verified: true }, scene: { state: 'running', flags: 0 } },
+  })
+  const el2 = () => h2.mini.React.createElement(h2.Section, null)
+  h2.mini.render(el2()); await flush()
+  h2.mini.render(el2()); await flush()
+  words = texts(h2.mini.render(el2())).join('|')
+  assert.ok(words.includes('指示灯状态：未启用'), `宿主回报 disabled 时必须显示「未启用」：${words.slice(0, 220)}`)
 })
 
 test('指示灯状态：连上之后只给「运行中」一个短词（端口/灯珠、画面都不要）', async () => {
@@ -490,7 +554,7 @@ test('设置页样式表必须跟着代码更新（跨热重载的旧 CSS 不能
   assert.ok(styleEl.textContent.includes('.dsh-notify-stepper'), '已存在的样式元素也要更新内容，不能直接 return')
 })
 
-test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/亮度等字段', () => {
+test('顺序：蜂鸣器紧跟启用开关，之后才是串口/亮度；「聚焦跟踪持续提醒」整行已移除', () => {
   const form = {
     getSnapshot: () => ({
       status: 'ready', writable: true,
@@ -503,9 +567,13 @@ test('顺序：聚焦跟踪持续提醒紧跟启用开关，之后才是串口/�
   mini.render(mini.React.createElement(Section, null))
   const words = texts(mini.render(mini.React.createElement(Section, null)))
   const at = (text) => words.indexOf(text)
-  assert.ok(at('启用任务状态指示灯') >= 0 && at('聚焦跟踪持续提醒') >= 0, '两个开关都要在')
-  assert.ok(at('启用任务状态指示灯') < at('聚焦跟踪持续提醒'), '提醒开关要紧跟启用开关')
-  assert.ok(at('聚焦跟踪持续提醒') < at('串口'), '提醒开关要在串口等字段之前')
+  assert.ok(at('启用任务状态指示灯') >= 0 && at('启用状态指示蜂鸣器') >= 0, '两个开关都要在')
+  assert.ok(at('启用任务状态指示灯') < at('启用状态指示蜂鸣器'), '蜂鸣器开关要紧跟指示灯开关')
+  assert.ok(at('启用状态指示蜂鸣器') < at('串口'), '蜂鸣器开关要在串口等字段之前')
+  assert.ok(at('串口') < at('亮度（%）'), '串口在亮度之前')
+  // 旧配置里仍然带着 ledAttention=true：设置页不再读它，也不该再出现这一行
+  assert.equal(at('聚焦跟踪持续提醒'), -1, '「聚焦跟踪持续提醒」这一行已删除')
+  assert.equal(/'ledAttention'/.test(CLIENT_SOURCE), false, '客户端半区不该再读 ledAttention（该能力恒开，配置字段只为兼容旧配置）')
 })
 
 test('指示灯状态：首屏给"启动中"，不因为拿不到宿主状态而崩', () => {
@@ -639,9 +707,15 @@ test('点击测试：菜单型选择控件（同预设行）+ 测试按钮，点
   // 展开后应列出全部状态（含"模型运行中"和"熄灭"）
   trigger.props.onClick()
   tree = h0.mini.render(el())
+  const menuItems = findAll(tree, (n) => n.props && n.props.role === 'menuitemradio')
+  assert.equal(menuItems.length, 6, '展开后应当列出 6 个测试项（新增「警告」）')
+  const doneItem = menuItems.find((n) => n.props['data-dsh-notify-silence-value'] === 'done')
+  assert.ok(doneItem, '默认项「已完成」应当带上 value')
+  assert.equal(findAll(doneItem, (n) => n.__host === 'svg').length, 1, '默认选中项应当有勾号（SelectMenu 本来就传了 selected）')
+  assert.equal(doneItem.props['aria-checked'], 'true', '选中项要 aria-checked=true')
   const words = texts(tree).join('|')
   assert.equal(words.includes('熄灭'), false, '不该再有「熄灭」测试项（会被误判成未连接）')
-  for (const label of ['模型运行中', '等待你', '已完成', '异常', '自检']) {
+  for (const label of ['模型运行中', '等待你', '已完成', '警告', '异常', '自检']) {
     assert.ok(words.includes(label), `选项里应当有「${label}」`)
   }
 
@@ -656,4 +730,128 @@ test('点击测试：菜单型选择控件（同预设行）+ 测试按钮，点
   assert.ok(posted, '点击应当请求 /dnotify/led')
   assert.match(String(posted.body), /"op":"test"/)
   assert.match(String(posted.body), /"kind":"done"/)
+
+  // 点选另一项：触发按钮文字跟着换，勾号跟着迁移（与静默菜单共用 MenuItem）
+  // （点测试按钮不会收起菜单，先把它关掉再重新打开）
+  findAll(tree, (n) => n.props && n.props['data-dsh-notify-led-test-select'] === '1')[0].props.onClick()
+  tree = h0.mini.render(el())
+  assert.equal(findAll(tree, (n) => n.props && n.props.role === 'menuitemradio').length, 0, '再点一次触发按钮应当收起菜单')
+  findAll(tree, (n) => n.props && n.props['data-dsh-notify-led-test-select'] === '1')[0].props.onClick()
+  tree = h0.mini.render(el())
+  findAll(tree, (n) => n.props && n.props.role === 'menuitemradio' &&
+    n.props['data-dsh-notify-silence-value'] === 'waiting')[0].props.onClick()
+  tree = h0.mini.render(el())
+  const triggerAfter = findAll(tree, (n) => n.props && n.props['data-dsh-notify-led-test-select'] === '1')[0]
+  assert.ok(texts(triggerAfter).join('').includes('等待你'), '选中项应当显示在触发按钮上')
+  triggerAfter.props.onClick()
+  tree = h0.mini.render(el())
+  const itemsAfter = findAll(tree, (n) => n.props && n.props.role === 'menuitemradio')
+  const waitingItem = itemsAfter.find((n) => n.props['data-dsh-notify-silence-value'] === 'waiting')
+  const doneAfter = itemsAfter.find((n) => n.props['data-dsh-notify-silence-value'] === 'done')
+  assert.equal(findAll(waitingItem, (n) => n.__host === 'svg').length, 1, '勾号应当迁到「等待你」')
+  assert.equal(findAll(doneAfter, (n) => n.__host === 'svg').length, 0, '原选中项不该再有勾号')
+})
+
+test('预设推送：静默模式下拉的选中项显示勾号，点选另一项后勾号跟着迁移', () => {
+  let types = [
+    { kind: 'task', enabled: true, silence: 'tab' },
+    { kind: 'ask', enabled: true, silence: 'session' },
+  ]
+  const setCalls = []
+  const subscribers = []
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types } }),
+    // 模拟宿主：写回配置后通知订阅者，Section 的下一次渲染才拿得到新快照
+    subscribe: (cb) => { subscribers.push(cb); return () => {} },
+    set: (key, value) => {
+      setCalls.push([key, value])
+      if (key !== 'types') return
+      types = value
+      for (const cb of subscribers) cb()
+    },
+  }
+  const h0 = loadSettingsSection({ form })
+  const el = () => h0.mini.React.createElement(h0.Section, null)
+  const triggerOf = (tree) => findAll(tree, (n) => n.props && n.props['data-dsh-notify-silence'] === 'task')[0]
+  const menuOf = (tree) => findAll(tree, (n) => n.props && n.props['data-dsh-notify-menu'] === '1')[0]
+  const itemOf = (menu, value) => findAll(menu,
+    (n) => n.props && n.props.role === 'menuitemradio' && n.props['data-dsh-notify-silence-value'] === value)[0]
+  const checkIcons = (item) => findAll(item, (n) => n.__host === 'svg').length
+
+  h0.mini.render(el())
+  let tree = h0.mini.render(el())
+  assert.ok(triggerOf(tree), '「任务完成」那行应当有静默模式下拉按钮')
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'false', '未展开时 aria-expanded=false')
+
+  triggerOf(tree).props.onClick()
+  tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'true', '展开后 aria-expanded=true')
+
+  const menu = menuOf(tree)
+  assert.ok(menu, '展开后应当渲染菜单浮层')
+  assert.equal(menu.props.role, 'menu', '浮层必须是 role=menu')
+  assert.ok(menu.props['aria-label'], '菜单要有可访问名')
+  const tab = itemOf(menu, 'tab')
+  const session = itemOf(menu, 'session')
+  const never = itemOf(menu, 'never')
+  assert.ok(tab && session && never, '三个静默选项都要渲染出来')
+  // 根因回归点：SilenceMenu 少传 selected 时，这里会全变成 0
+  assert.equal(checkIcons(tab), 1, '选中项（tab）必须有勾号')
+  assert.equal(tab.props['aria-checked'], 'true', '选中项要 aria-checked=true')
+  assert.equal(checkIcons(session), 0, '没选中的项不该有勾号')
+  assert.equal(session.props['aria-checked'], 'false', '未选中项 aria-checked=false')
+  assert.equal(checkIcons(never), 0, '没选中的项不该有勾号')
+
+  // 点「从不静默」：写回 types、菜单收起、勾号迁移
+  never.props.onClick()
+  tree = h0.mini.render(el())
+  const [key, nextTypes] = setCalls.pop()
+  assert.equal(key, 'types', '应当把静默模式写回 types')
+  assert.equal(nextTypes.find((row) => row.kind === 'task').silence, 'never', '「从不静默」要写进该行')
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'false', '点选后菜单应当收起')
+
+  triggerOf(tree).props.onClick()
+  tree = h0.mini.render(el())
+  const menu2 = menuOf(tree)
+  const never2 = itemOf(menu2, 'never')
+  assert.equal(checkIcons(never2), 1, '勾号应当迁到「从不静默」')
+  assert.equal(never2.props['aria-checked'], 'true')
+  assert.equal(checkIcons(itemOf(menu2, 'tab')), 0, '原来选中的项不该再有勾号')
+})
+
+test('静默模式菜单：点外面 / Esc 收起，且不展开时不挂全局监听', () => {
+  const types = [{ kind: 'task', enabled: true, silence: 'session' }]
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true, types } }),
+    subscribe: () => () => {},
+    set: () => {},
+  }
+  const h0 = loadSettingsSection({ form })
+  const el = () => h0.mini.React.createElement(h0.Section, null)
+  const triggerOf = (tree) => findAll(tree, (n) => n.props && n.props['data-dsh-notify-silence'] === 'task')[0]
+
+  h0.mini.render(el())
+  let tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'false')
+  assert.equal(h0.listenerCount('document', 'mousedown'), 0, '菜单没展开时不该挂全局 mousedown 监听')
+  assert.equal(h0.listenerCount('document', 'keydown'), 0, '菜单没展开时不该挂 Esc 监听')
+
+  triggerOf(tree).props.onClick()
+  tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'true')
+  assert.ok(h0.listenerCount('document', 'mousedown') >= 1, '展开时应当挂上全局 mousedown 监听')
+  assert.ok(h0.listenerCount('document', 'keydown') >= 1, '展开时应当挂上 Esc 监听')
+
+  // 点菜单外面
+  h0.dispatch('document', 'mousedown', { target: null })
+  tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'false', '点菜单外面应当收起')
+
+  // 再打开，按 Esc
+  triggerOf(tree).props.onClick()
+  tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'true')
+  h0.dispatch('document', 'keydown', { key: 'Escape' })
+  tree = h0.mini.render(el())
+  assert.equal(triggerOf(tree).props['aria-expanded'], 'false', 'Esc 应当收起菜单')
 })

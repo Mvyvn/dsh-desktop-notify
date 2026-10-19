@@ -51,18 +51,45 @@ interface PageRecord {
 export interface PageRegistryOptions {
   /** 多久没上报算过期（默认 5 分钟：客户端心跳 60s，留足冗余）。 */
   readonly idleTtlMs?: number
+  /** 页面记录硬上限（默认 64）：页面 id 由客户端生成，异常/恶意上报不能无限建档。 */
+  readonly maxPages?: number
 }
 
 const DEFAULT_IDLE_TTL_MS = 300_000
+const DEFAULT_MAX_PAGES = 64
 
 export class PageRegistry {
   readonly #pages = new Map<string, PageRecord>()
   /** 曾经聚焦过的页面 id（"用户在用的那个"），页面消失时才清。 */
   #lastFocusedPageId = ''
   readonly #idleTtlMs: number
+  readonly #maxPages: number
 
   constructor(options: PageRegistryOptions = {}) {
     this.#idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS
+    this.#maxPages = Math.max(1, Math.trunc(options.maxPages ?? DEFAULT_MAX_PAGES))
+  }
+
+  /**
+   * 超出上限时淘汰：先清过期，再丢"没有活跃连接且最久没上报"的；
+   * 如果剩下全是有连接的（SSE 连接本身另有上限），允许暂时超出，绝不误删在线页面。
+   */
+  #enforceLimit(now: number, keepPageId = ''): void {
+    if (this.#pages.size <= this.#maxPages) return
+    this.prune(now)
+    let guard = this.#pages.size - this.#maxPages
+    while (guard > 0) {
+      let victim: PageRecord | undefined
+      for (const record of this.#pages.values()) {
+        if (record.streams > 0) continue
+        if (record.pageId === keepPageId) continue   // 刚建的那一页不能被自己挤掉
+        if (victim === undefined || record.lastSeen < victim.lastSeen) victim = record
+      }
+      if (victim === undefined) return
+      this.#pages.delete(victim.pageId)
+      if (this.#lastFocusedPageId === victim.pageId) this.#lastFocusedPageId = ''
+      guard -= 1
+    }
   }
 
   get size(): number {
@@ -87,6 +114,7 @@ export class PageRegistry {
     }
     this.#pages.set(report.pageId, record)
     if (report.focused) this.#lastFocusedPageId = report.pageId
+    this.#enforceLimit(now, report.pageId)
     // 失焦就把"当前聚焦"清掉（这正是旧实现漏掉的）；但 #lastFocusedPageId 保留，
     // 因为用户切去别的应用后我们仍要跳到"他最后用的那个 DSH 页面"。
     return 'accepted'
@@ -97,6 +125,7 @@ export class PageRegistry {
     const record = this.#pages.get(pageId)
     if (record === undefined) {
       this.#pages.set(pageId, { pageId, focused: false, sessionId: null, seq: 0, lastSeen: now, streams: 1 })
+      this.#enforceLimit(now, pageId)
       return
     }
     record.streams += 1

@@ -2,7 +2,7 @@
 
 为 [DSH](https://github.com/deepseek-ai/dsh) 打造的桌面通知插件（Windows / Linux），随 `dsh web` 启动自动加载，无需审批。
 
-**版本 2.1.4** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
+**版本 2.4.16** · 兼容 **DSH `>=0.2.0-rc.2` 且 `<=0.2.1-rc.2`**（`package.json` 的 `peerDependencies` 原文，范围内的其它小版本未逐一实测）。
 
 ## 依赖需求
 
@@ -16,9 +16,11 @@
 ## 能力
 
 - **任务完成**：agent 干完活回到空闲时，弹「✅ DSH 任务完成」+「工作区/会话名:结尾输出内容」
+- **会话终止**：回合被用户/父会话/会话关闭/hook 中止，或模型断链/出错、达到 token 上限、崩溃中断时，弹「⛔ DSH 会话终止」+「工作区/会话名:终止原因」（红灯）
 - **等待你回答**：AI 发起 `ask_user_question` 提问时，弹「❓ DSH 等待你的输入」提醒你回来
 - **审批被自动拒绝**：`never` 审批政策下操作被静默拒绝时，弹「🚫 DSH 操作被自动拒绝」告知
 - **后台任务结束**：后台子代理 / 目标完成或卡住 / 后台命令任务结束时逐一提醒
+- **后台子代理终止**：子代理非正常结束（aborted / error / max-tokens / refusal）时弹「⏹️ DSH 后台子代理终止」（黄灯）；正常结束仍是「🤖 DSH 后台子代理结束」
 - **定时任务触发**：定时任务**真正被投递（触发）时**提醒；只创建、还没触发时不打扰
 - **启动播报**：每次 `dsh web` 启动后推一条「🚀 DSH 插件挂载成功」（正文 `共有 N 个插件被成功加载，dsh-desktop-notify 运行模式：正常/降级`）；有插件异常时标题改为「⚠️ DSH 插件挂载异常」、正文列出数量与 id。每次启动只推一次
 - **点击跳转**：会话类与页面类通知点击后跳回对应位置；没有跳转目标的通知点了只会消失
@@ -26,39 +28,7 @@
 - **标题一律带 `DSH` 前缀**：通知的图标与来源行由"谁发的通知"决定（Web Notification 显示浏览器身份，无法修改），所以品牌位落在标题上——每条通知标题都是「emoji + DSH + 内容」
 - **权限变更即时通知**：标题「⚠️ DSH 权限变更」，正文 `dsh-desktop-notify 跟踪到消息提醒权限变更为:xxx，插件运行模式同步变更为xxx`（`xxx` 为 `granted`/`denied`/`default` 与 `正常`/`降级`）；不受聚焦门控静默，重复回报同一状态不打扰
 - **DSH 图标**：原生 Toast 的图标与应用身份均用 DSH Logo（透明底 PNG/ICO），深浅两套按系统主题自动切换
-- **原生直连发送**：Windows 用 koffi 直调 WinRT，Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程**
-
-## 串口 LED 状态灯
-
-除桌面通知外，本插件还能驱动一块**一直亮着的状态灯**（默认关闭，不影响通知行为）。
-硬件是 **[AI Status Lights](https://github.com/Mvyvn/AI_Status_Lights)**：
-CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115200 8-N-1**）控制。
-把"AI 在干嘛"变成颜色——躺床上不用看屏幕：
-**白=在跑**（彗星来回跑）、**黄=等你回话**、**绿=完成**、**红=异常**。
-
-它比系统通知多做两件事：
-
-- **真的算"完成"**：DSH 的 `agent/status = idle` 只代表**这一轮结束**。还有子代理在跑、
-  后台任务没结算、inbox 里压着待处理输入（会被再次调起）、目标仍是 `active` 时，
-  灯**继续流动**而不是变绿（判定见 `src/lifecycle.ts`）。
-- **没看到就一直提醒**：自你上次聚焦 DSH 页面之后再没回来，画面会周期双闪，
-  **不会随时间自己安静下来**；回到页面（或调 `ack`）才解除（判定见 `src/led-judge.ts`）。
-
-协议只有三条命令（验证 / 设 7 颗灯颜色 / 蜂鸣），**动画和亮度都在主机端算好再推**：
-26 字节/帧，目标 **240fps** ≈ 6.2 KB/s，占 115200 的 **54.2%**（一帧线上 2.257ms，
-线速上限 443fps）。实测与背压策略见 [`docs/serial-protocol.md`](docs/serial-protocol.md#帧率与背压)
-和 `scripts/led-fps-probe.mjs`。
-
-| 文档 | 内容 |
-| --- | --- |
-| [`docs/serial-protocol.md`](docs/serial-protocol.md) | 真机帧格式、主机端渲染、**对外 API（特殊版本）** |
-| [AI_Status_Lights](https://github.com/Mvyvn/AI_Status_Lights) | 硬件、接线、烧录、Python 上位机 |
-
-在设置页打开「启用任务状态指示灯」即可；串口留 `auto` 会自动挑 USB 串口（优先 CH340）。
-状态卡片实时显示**五个词**之一：未连接 / 未启用 / 运行中 / 异常 / 启动中。
-
-> ⚠️ Windows 上 CH340 需要装驱动（WCH）。没装时设备管理器里是 `USB Serial` 带感叹号、
-> **不会分配 COM 口**，插件会如实显示「未连接」。
+- **原生直连发送**：Windows 用 koffi 直调 WinRT（**在独立 worker 线程发送**，不阻塞主线程），Linux 直连 D-Bus（`org.freedesktop.Notifications`）——**无 Python、无子进程**
 
 ## 安装
 
@@ -101,10 +71,12 @@ npm run build        # tsc ×3 → lib/
 
 | 通知 | 触发 | 静默判定用的会话 | 正文格式 |
 | --- | --- | --- | --- |
-| ✅ 任务完成 | `agent/status` running→idle（仅根 agent，3 秒去抖） | 该 agent 的会话 | 工作区/会话名:结尾输出内容 |
+| ✅ 任务完成 | `agent/status` running→idle（仅根 agent，800ms 去抖） | 该 agent 的会话 | 工作区/会话名:结尾输出内容 |
+| ⛔ DSH 会话终止 | `session/event` 的 `turn/end.reason`（非 `completed`；仅根会话自己的 turn） | **该会话本身** | 工作区/会话名:用户中止 / 母会话中止 / 会话已关闭 / 被 hook 中止：原因 / 出错：原因 / 达到输出 token 上限 / 回合被阻塞 / 异常中断（进程崩溃） |
 | ❓ 等待你回答 | `tools/execute` 捕获 `ask_user_question` 派发 | **发起提问的那个会话本身** | 工作区/会话名:[类型] 内容 |
 | 🚫 DSH 审批被自动拒绝 | `session/event` 流 `approval/asked`+`decided` 审计对 | **被拒操作所在会话本身** | 工作区/会话名:工具名-拒绝原因 |
-| 🤖 DSH 后台子代理结束 | `subagent/end` | **母会话 + 子代理会话**（看其中任一都静默） | 工作区/母会话名:子代理名已完成 |
+| 🤖 DSH 后台子代理结束 | `subagent/end` 且 `stopReason=completed` | **母会话 + 子代理会话**（看其中任一都静默） | 工作区/母会话名:子代理名已完成 |
+| ⏹️ DSH 后台子代理终止 | `subagent/end` 且 `stopReason` 非 `completed`（含 `aborted`=手动/取消、`error`、`max-tokens`、`refusal`、超时、缺失或未知值） | **母会话 + 子代理会话**（看其中任一都静默） | 工作区/母会话名:子代理名:终止原因（缺失时显示“未提供终止原因”，绝不空白） |
 | 🎯 DSH 目标完成 / 阻塞 | `goal/changed` | 目标所属会话 | 工作区/会话名:目标-已完成 / 目标-阻塞原因 |
 | 🧰 DSH 后台任务结束 | `jobs.events` 的 `settled`（`awaited` 也通知；`kind='subagent'` 的 job 由上一行负责） | **所属会话 + 其所属子代理的母会话** | 工作区/母会话名:后台任务名已完成/失败/被终止 |
 | 🕒 DSH 团队任务待处理 / ✅ DSH 团队任务已完成 | `session/event` 的 `team/task`（只对状态变化发） | 任务 owner 的母会话 | 工作区/会话名:任务标题 |
@@ -132,7 +104,7 @@ npm run build        # tsc ×3 → lib/
 
 ## 给其它插件调用（对外 API）
 
-**基线协议版本：`1.0.0`**（`NOTIFY_API_VERSION`）。兼容约定：载荷里的**未知字段一律忽略**（新增可选字段不破坏老调用方）；可带 `v: '1.0.0'` 声明版本，**更高的主版本**不会中断推送，但结果里会回带 `unsupportedVersion: true`；结果对象**只增不改**；用 `capabilities` 探测能力（`push` / `pushAlways` / `notify` / `click.session` / `click.page` / `click.url` / `click.legacy-url` / `web-notification` / `dialog.four-state`），不要靠版本号猜。
+**基线协议版本：`1.1.0`**（`NOTIFY_API_VERSION`）。兼容约定：载荷里的**未知字段一律忽略**（新增可选字段不破坏老调用方）；可带 `v: '1.0.0'` 声明版本，**更高的主版本**不会中断推送，但结果里会回带 `unsupportedVersion: true`；结果对象**只增不改**；用 `capabilities` 探测能力（`push` / `pushAlways` / `notify` / `click.session` / `click.page` / `click.url` / `click.legacy-url` / `web-notification` / `dialog.four-state`，以及 LED 相关能力），不要靠版本号猜。**旧 API（1.0.x）调用方完全兼容**：返回值字段与行为不变；外部 `push` / `notify` 只负责弹通知，**默认不会自动点灯**（`led.host-only`），要控制灯请显式调用 `desktopNotify.led`（见下一节）。
 
 本插件把自己注册成 Cordis 服务 `desktopNotify`，**你自己的插件可以直接调用它推送通知**：
 
@@ -158,7 +130,7 @@ export function apply(ctx) {
 
   // 3) 想要明细（是否真的入队/是否被静默/原因）用 notify()
   const result = desktopNotify.notify({ title: '构建完成', sessionId: agent.session })
-  // { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.0.0', unsupportedVersion: false }
+  // { ok: true, queued: false, silenced: true, reason: 'silenced', apiVersion: '1.1.0', unsupportedVersion: false }
 
   // 4) 点击跳转：用 click 显式声明（四态），**不传 click 就是不可点击**
   desktopNotify.push({ title: '构建完成', sessionId: agent.session,
@@ -184,7 +156,88 @@ export function apply(ctx) {
 - 想全局取用可写 `inject: ['desktopNotify']`（硬依赖，本插件缺失时你的插件不会加载）；否则用 `ctx.get` 按可选服务处理。
 - 设置页的**对外 API** 开关关闭后，本服务仍在（`apiVersion` / `capabilities` 照常可读，便于调用方探测），但 `push` / `pushAlways` 一律不入队；`notify()` 会如实返回 `reason: 'api-disabled'`。
 
+### 串口 LED 状态灯：给其它插件调用（对外 API）
+
+`desktopNotify.led` 是 LED 控制面，**可能为 `null`**（没装串口后端 / 灯带功能未启用），调用方必须判空：
+
+```js
+const led = ctx.get('desktopNotify')?.led
+if (!led) return
+led.scene('warn')                              // 语义状态（状态与优先级见下一节）
+led.scene('running', { brightness: 200 })      // 亮度 0..255
+led.pixels([{ r: 255, g: 0, b: 0 }, /* … 7 颗 */])
+led.beep({ freqHz: 660, volume: 20, durationMs: 120 })
+led.frame(0x00)                                // 白名单原始帧（0x00/0x01/0x02）
+led.acknowledge()                              // 解除"没看到就一直提醒"的闩
+led.status()                                   // 链路/判定/设备快照
+```
+
+- **版本**：`LED_API_VERSION = '1.1.0-led.3'`（`led.version`，与通知 API 分开标注）；用 `capabilities.includes(...)` 探测能力，不要靠版本号猜。
+- **兼容旧 API**：`v: '1.0.x'` 调用方行为不变；外部推送**默认不点灯**（`led.host-only`），要主动点灯必须显式调用 `led.scene()` 等方法。
+- **失败语义**：灯带关闭时请求仍合法但 `queued=false` / `reason='led-disabled'`，不写串口；链路未连上时 `reason='link-down'`。
+
+详细帧格式、颜色/优先级与背压见下一节「串口 LED 状态灯」及 [`docs/serial-protocol.md`](docs/serial-protocol.md#4-对外-api-ctxgetdesktopnotifyled)。
+
+## 串口 LED 状态灯
+
+除桌面通知外，本插件还能驱动一块**一直亮着的状态灯**（默认关闭，不影响通知行为）。
+硬件是 **[AI Status Lights](https://github.com/Mvyvn/AI_Status_Lights)**：
+CH32V003F4P6 + **7 颗 WS2812B** + 无源蜂鸣器，一路串口（**固定 115200 8-N-1**）控制。
+把"AI 在干嘛"变成颜色——躺床上不用看屏幕：
+**白=在跑**（彗星来回跑）、**橙=等你回话**、**绿=完成**、**黄=警告**（1 秒瞬态）、**红=异常**。
+灯色与通知事件的对应关系（优先级 **红 > 黄 > 橙 > 绿 > 白**，**目标阻塞会立即亮红，不等运行结束**）：
+
+| 灯色 | 事件 |
+| --- | --- |
+| 🟢 绿（2s） | 任务完成、后台子代理正常结束、目标已完成、团队任务已完成 |
+| 🟠 橙（呼吸，比旧琥珀更橙） | 等待你回答 / 审批 |
+| 🟡 黄（**无论是否聚焦都只亮 1s**） | 审批被自动拒绝、后台任务失败或被终止、**后台子代理终止**（异常/手动/达到上限/拒绝） |
+| 🔴 红（常亮/提醒时慢闪） | 目标阻塞、异常、**会话终止**（用户/父会话中止、会话关闭、模型断链/出错、达到 token 上限、崩溃中断） |
+| ⚪ 白（彗星） | 模型运行中 |
+
+**灯的聚焦只看标签页级**：任一 DSH 标签页可见且持焦点就算“人在看”，不按各通知预设的 `silence` 分级，也不看具体会话。灯与通知的静默判定是两套独立规则。
+
+它比系统通知多做两件事：
+
+- **真的算"完成"**：DSH 的 `agent/status = idle` 只代表**这一轮结束**。还有子代理在跑、
+  后台任务没结算、inbox 里压着待处理输入（会被再次调起）、目标仍是 `active` 时，
+  灯**继续流动**而不是变绿（判定见 `src/lifecycle.ts`）。
+- **没看到就一直提醒**：自你上次聚焦 DSH 页面之后再没回来，画面会周期双闪，
+  **不会随时间自己安静下来**；回到页面（或调 `ack`）才解除（判定见 `src/led-judge.ts`）。
+
+协议只有三条命令（验证 / 设 7 颗灯颜色 / 蜂鸣），**动画和亮度都在主机端算好再推**：
+26 字节/帧，目标 **240fps** ≈ 6.2 KB/s，占 115200 的 **54.2%**（一帧线上 2.257ms，
+线速上限 443fps）。实测与背压策略见 [`docs/serial-protocol.md`](docs/serial-protocol.md#帧率与背压)
+和 `scripts/led-fps-probe.mjs`。
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/serial-protocol.md`](docs/serial-protocol.md) | 真机帧格式、主机端渲染、**对外 API（特殊版本）** |
+| [AI_Status_Lights](https://github.com/Mvyvn/AI_Status_Lights) | 硬件、接线、烧录、Python 上位机 |
+
+在设置页打开「启用任务状态指示灯」即可；串口留 `auto` = **同时驱动所有识别到的灯**
+（多块灯插同一台机器时一起亮、画面一致）。也可以手动指定：`COM5` 只驱动一块，
+`COM5,COM9`（英文逗号）驱动指定的多块；写了 `auto`（如 `auto,COM5`）则整体按 auto 处理。
+状态卡片实时显示**五个词**之一：未连接 / 未启用 / 运行中 / 异常 / 启动中。
+**渲染、帧循环、串口收发全部在独立线程**：主线程只做采样/判定，主界面卡顿或 GC 不会让灯掉帧；
+帧循环按需运行（动画 240fps，空闲 250ms/帧）。
+
+> ⚠️ Windows 上 CH340 需要装驱动（WCH）。没装时设备管理器里是 `USB Serial` 带感叹号、
+> **不会分配 COM 口**，插件会如实显示「未连接」。
+
 ## 排查：为什么这条提醒没弹 / 点了没跳
+
+### 已知问题：Firefox 点击通知不跳转（暂时无法修复，可手动缓解）
+
+Firefox 在 Windows 上把通知交给**系统通知中心**（Windows Notification Server）显示后，点击通知**不会**把激活事件交回页面：Service Worker 的 `notificationclick` 与页面侧的认领链路都收不到，表现为"通知能看到，点了没反应"。这是 Firefox 侧的行为，本插件无法修复。
+
+缓解办法（在 Firefox 地址栏打开 `about:config`，把下面这项设为 `false`）：
+
+```
+alerts.useSystemBackend.windows.notificationserver.enabled = false
+```
+
+改完后新的通知由 Firefox 自己绘制，点击会正常回到发起通知的 DSH 标签页。如果仍然异常，可以把上一层的 `alerts.useSystemBackend` 也设为 `false`。Chrome / Edge 不受影响；原生 Toast 路线（`launchMode: 'protocol'`）也不依赖浏览器点击回调，因此不受此问题影响。
 
 宿主暴露令牌保护的诊断端点 `GET /dnotify/status?t=<进程令牌>`。令牌是**进程级**的，可以从通知点击地址里的 `t=` 参数拿到（原生 Toast 的落地页 URL 形如 `/dnotify/click?t=…&raw=…`），或从 profile 日志里取。
 
@@ -208,14 +261,15 @@ dsh-desktop-notify/
 │                 # protocol.ts（ClickTarget 四态 + 线格式）、pages.ts（页面注册表状态机）
 │                 # activation.ts（激活决策）、gate.ts（按会话门控）、api.ts（对外推送 API）
 │                 # index.ts（路由/队列/事件/分流）、client.ts（浏览器半区）、config.ts（设置页配方）
-│                 # 发送层 winrt.ts（Windows / koffi 直调 WinRT）、toast-linux.ts（Linux / D-Bus 直连）
+│                 # 发送层 winrt.ts（Windows / koffi 直调 WinRT）、toast-worker.ts + toast-bridge.ts（worker 发送/回退）
+│                 # toast-linux.ts（Linux / D-Bus 直连）
 │                 # 主题 theme*.ts、基础设施 dbus.ts / win32-registry.ts / state.ts / text.ts
 ├── lib/          # 构建产物（提交进仓库，运行时由 DSH 直接加载）
 ├── assets/       # dnotify-sw.js（通知用 Service Worker，由宿主在 /dnotify/sw.js 提供）
 │                 # 图标：dsh-dark.{png,ico}（白鱼/深色主题）、dsh-light.{png,ico}（黑鱼/浅色主题）、dsh.{png,ico} 旧路径兼容
 ├── locale/       # 设置页文案（zh / en）
 ├── scripts/      # 语法自检 check-syntax.mjs、测试入口 run-tests.mjs
-│                 # 冒烟测试 winrt-probe.mjs、theme-probe.mjs、契约自检 dsh-runtime-probe.mjs
+│                 # 冒烟测试 winrt-probe.mjs、toast-worker-probe.mjs、theme-probe.mjs、契约自检 dsh-runtime-probe.mjs
 │                 # 图标生成 make-icon.py（开发期换图用，需 Python）
 ├── tests/        # node --test 单测（协议/注册表/激活 / 宿主集成事件流 / 浏览器半区 / 门控 / API
 │                 #                / D-Bus 编组 / 主题判定 / 图标解析 / 有界容器 / 文本截断 / 句柄不变量）
@@ -267,6 +321,8 @@ dsh-desktop-notify/
 ### 发送层（原生直连，无子进程）
 
 - **Windows（`lib/winrt.js`）**：koffi 直调 WinRT（`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')` → `XmlDocument.LoadXml` → `Show`），不拉起任何 Python/子进程；发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName = DeepSeek Harness` + `IconUri`，随主题改写）。
+  - **同步 COM 在独立 worker 线程执行**（`lib/toast-worker.js`，主线程只 postMessage）：`RoActivateInstance` / `LoadXml` / `Show` 实测单条可 >100ms，放在主线程会顶住事件循环。
+  - **安全网**：worker 启动先 probe（只初始化 WinRT、不发通知）；probe 失败/超时/线程退出 → 自动回退主线程 inline（行为与旧版一致），单条失败该条 inline 补发；worker 已 `unref`，不拖住宿主退出。真机验证脚本：`node scripts/toast-worker-probe.mjs`。
 - **Linux（`lib/toast-linux.js`）**：纯 JS 直说 D-Bus 协议（`$DBUS_SESSION_BUS_ADDRESS` 或 `/run/user/<uid>/bus`，SASL EXTERNAL → `Hello` → `org.freedesktop.Notifications.Notify`），不调用 `notify-send`；连接常驻复用、断开自动重连。`app_name` 同样是 **DeepSeek Harness**，图标随主题选。
 - 两平台共用同一条发送队列：200ms 间隔防轰炸，发送失败单次重排队，队列上限 32 条。
 
@@ -278,9 +334,10 @@ dsh-desktop-notify/
 
 - **会话类通知** → `session:<会话 id>`，客户端用公开服务 `ctx.get('uiWorkspace').openSession(id)` 就地切换。
 - **子代理与后台任务** → 点击一律指向**母会话**（宿主沿 `header.parentSession` 回溯到顶层），子代理自己的名字写在正文里。**注意这与静默判定分开**：静默按事件所属会话判定。
-- **启动播报** → `page:settings-plugins`：客户端先点侧边栏的**真实设置入口**（可访问名「设置」，含桌面端的「账号菜单 → 设置」），再在设置对话框里点「内置插件」导航格并**验证它已就位**；打不开就继续重试（深链场景下页面刚加载，界面可能几秒后才挂载，最多等 10 秒）。**不会**退到侧栏「插件」页——落点错了就是错。
+- **启动播报** → `page:settings-plugins`：客户端先点真实的**账号菜单**（左下角，可访问名「账号菜单」；新版 DSH 的「设置」在菜单里，不是独立按钮），再点菜单里的「设置」；桌面端也可直接走账号菜单。打开设置对话框后点「内置插件」导航格并**验证它已就位**；打不开就继续重试（深链场景下页面刚加载，界面可能几秒后才挂载，最多等 10 秒，轮询 100ms / 入口重试 300ms）。**只等设置弹窗，不打开插件面板兜底**。
 - `{ type: 'url' }` 目标与 DSH 页面无关，直接交给系统/浏览器打开。
 - 已有页面在线时，点击**不会新开窗口**：目标经 `/dnotify/events` 定向推给那个页面，由它就地跳转；页面不在时才打开 `#dsh-notify=<目标>` 深链。
+- **浏览器通知点击后只做最简单的 Win32 前台尝试（Windows）**：SW `WindowClient.focus()` 切标签页 → `postMessage` 让页面跳转 → **页面 ack 跳转落地后**才请求 `/dnotify/focus`（旧页面不 ack 时 2s 超时兜底；新开窗口等页面注册或 1.5s 超时，并保留 `openWindow()` 返回的 `WindowClient` 再 `focus()`）；宿主用 **koffi 直接调 user32**：先看 `GetForegroundWindow()` 是否已是受支持的浏览器窗口，是则直接成功；通知中心占前台时短暂等待重读，仍不是才回退一次枚举按标题选窗口，再 `ShowWindowAsync`+`SetForegroundWindow` 验证。`/focus` 返回 `windowFound/atFront/attempts/reason`，SW 按真实结果回报。**没有跳转目标（`target=none`）的通知点击只关闭，不聚焦、不新开、不抢前台**。原生通知路径（`/dnotify/click`、`/dnotify/activate`）不额外抢前台。`focusWindow: false` 可关；Linux 不做这步。
 - 兼容：旧字段 `url`（http/https）等价于 `{ type: 'url' }`；旧的 `#dsh-notify=<目标>` 深链与旧版 `/dnotify/click?target=<目标>` 链接仍然可用。
 
 ### 其它

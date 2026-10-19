@@ -59,6 +59,10 @@
     "src/led-protocol.ts",
     "src/lifecycle.ts",
     "src/led-judge.ts",
-    "src/serial-link.ts"
+    "src/serial-link.ts",
+    // 串口读取节奏（纯函数；worker 使用，放进严格档便于单测与类型收紧）
+    "src/serial-pump.ts",
+    // 多灯扇出层（纯逻辑；组合多条 serial-link，不直接碰原生）
+    "src/serial-fanout.ts"
   ]
 }

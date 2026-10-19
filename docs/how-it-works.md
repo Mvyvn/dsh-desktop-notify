@@ -51,10 +51,12 @@
 
 | 通知 | 钩子 | 触发点 | 正文格式 |
 | --- | --- | --- | --- |
-| ✅ 任务完成 | `agent/status` | 根 agent `running→idle`，3 秒去抖 | `工作区/会话名:结尾输出内容` |
+| ✅ 任务完成 | `agent/status` | 根 agent `running→idle`，800ms 去抖 | `工作区/会话名:结尾输出内容` |
+| ⛔ 会话终止 | `session/event` 的 `turn/end` | 根会话自己的 turn 非 `completed`（aborted/error/max-tokens/blocked/crash-orphaned） | `工作区/会话名:终止原因`（用户中止/母会话中止/会话关闭/被 hook 中止/出错/达到 token 上限/回合被阻塞/异常中断） |
 | ❓ 等待你回答 | `tools/execute` | `ask_user_question` 派发瞬间 | `工作区/会话名:[类型] 内容` |
 | 🚫 审批被自动拒绝 | `session/event` | `approval/asked` + `approval/decided` 审计对 | `工作区/会话名:工具名-拒绝原因` |
-| 🤖 后台子代理结束 | `subagent/end` | 子代理收敛 | `工作区/主会话名:子代理名已完成` |
+| 🤖 后台子代理结束 | `subagent/end` | `stopReason=completed` | `工作区/主会话名:子代理名已完成` |
+| ⏹️ 后台子代理终止 | `subagent/end` | `stopReason` 非 `completed`（aborted/error/max-tokens/refusal 等） | `工作区/主会话名:子代理名:终止原因` |
 | 🎯 目标完成 / 阻塞 | `goal/changed` | `complete` / `block` | `工作区/会话名:目标-已完成 / 目标-阻塞原因` |
 | 🧰 后台任务结束 | `jobs.events` 的 `settled` | 任务结算（**`awaited` 也通知**；`kind='subagent'` 由上一行负责） | `工作区/主会话名:后台任务名已完成/失败/被终止` |
 | 🕒 / ✅ 团队任务 | `session/event` 的 `team/task` | 只对状态变化发（`in_progress`/`deleted` 不打扰） | `工作区/会话名:任务标题` |
@@ -104,7 +106,7 @@
 7. **降级判定**：`lastRoute.reason` 会写清原因（`no-online-page` / `permission-not-granted` / `deliver-failed` / `no-shown-ack` / `show-error`）。`/dnotify/click` 一律 302 到 DSH 深链（`#dsh-notify=<目标>`），客户端解析后清掉 hash，避免刷新重复触发。
 8. 客户端执行目标：
    - `session:<id>` → `ctx.get('uiWorkspace').openSession(id)`（与点侧栏会话行同一条链路）；服务未就绪就重试；会话不在客户端目录里（同步抛错）则只记一行日志放弃。子代理会话由 ui-workspace 自己的规则解析成**子代理界面**；子代理/后台任务通知的目标是它的**主会话**。
-   - `page:settings-plugins` → 先点侧边栏**真实设置入口**（可访问名「设置」；桌面端走「账号菜单 → 设置」），再在设置对话框（`role="dialog"` + 可访问名「设置」）里按**可访问名**点「内置插件」导航格并验证已就位（`aria-current`）；打不开就重试（深链场景下界面可能几秒后才挂载，最多 10 秒）。**不会**退到侧栏「插件」页——落点错了就是错。
+   - `page:settings-plugins` → 先点左下角**账号菜单**（新版 DSH 的「设置」在菜单里；按可访问名「账号菜单」/账户/用户匹配，打开后等 120ms 再找「设置」），再在设置对话框（`role="dialog"` + 可访问名「设置」）里按**可访问名**点「内置插件」导航格并验证已就位（`aria-current`）；打不开就重试（深链场景下界面可能几秒后才挂载，最多 10 秒，轮询 100ms / 入口重试 300ms）。只等设置弹窗，不打开插件面板兜底。
    - `page:plugins` → `ctx.get('pluginNavigation').openBundle('@mvyvn/dsh-desktop-notify')`（退路 `layout.selectPanel('plugins')`）。
 
 > 跳转结果会回报给宿主（`/dnotify/navigated`）：认领成功 ≠ 跳转成功，`not-found` 表示目标会话已不在客户端目录里，这是"点了却没跳"唯一的诊断痕迹。
@@ -123,6 +125,7 @@
 | `/dnotify/sw.js` | GET | **无**（静态资源） | 提供通知用 Service Worker（注册 SW 的请求不带页面鉴权头） |
 | `/dnotify/click` | GET | 进程令牌 `t=` | 浏览器/系统打开的点击落地页：校验后 302 到 DSH 深链 |
 | `/dnotify/activate` | GET | 进程令牌 `t=`（**必须匹配**） | 本机转发器与 Linux 后端的激活端点：宿主决策后返回 `{action: 'delivered'\|'open'\|'ignore'}` |
+| `/dnotify/focus` | GET | 进程令牌 `t=`（**必须匹配**） | 页面 ack 跳转后请求前台激活（Windows：koffi 调 user32；返回 `windowFound/atFront/attempts/reason`） |
 | `/dnotify/status` | GET | 进程令牌 `t=`（**必须匹配**） | 令牌保护的诊断快照 |
 | `/dnotify/poc-notify` | GET | `admit()` | 开发期触发器：让在线页面弹一条通知，用于验证 SW 链路 |
 
@@ -134,9 +137,11 @@
 
 `dsh-user-approval` 的 `decide()` 在 `never` 政策下直接返回 `'rejected'`，**不会派发** `approval/request` waterfall。但每次询问/裁决都会在会话日志落审计事件 `approval/asked` + `approval/decided`。因此插件监听 `session/event`（post-commit 追加流）读取这对审计事件——`never` 政策下每条被拒操作都会产生一条完整记录。
 
-## 发送层（进程内原生直连）
+## 发送层（原生直连；Windows 在独立 worker）
 
 - **Windows（`lib/winrt.js`，koffi）**：`ToastNotificationManager` → `ForUser` → `CreateToastNotifierWithId('DSH')`（notifier 进程内缓存复用）→ `XmlDocument` 激活 → `LoadXml` → `ToastNotification` → `Show`。
+  - **这些是同步 COM 调用**（实测单条可 >100ms）：生产环境把它们放进独立 worker（`lib/toast-worker.js`），主线程只 `postMessage`，不再顶住事件循环。
+  - `lib/toast-bridge.js` 负责安全网：worker 启动先 probe（只初始化 WinRT + 建 notifier，不弹通知）；probe 失败/超时/线程退出 → 自动回退主线程 inline；单条发送报错 → 该条 inline 补发；probe 期间的通知先排队；协议注册结果同步给 worker（点击仍走 `dsh-notify:`）。
   - 不用旧 `Statics.CreateToastNotifier(appId)`：本机返回 `0x80070490`，必须走 `ForUser` 变体；
   - WinRT 字符串参数一律 HSTRING（`WindowsCreateString`），不是 LPCWSTR；
   - 首次发送前幂等写入 `HKCU\SOFTWARE\Classes\AppUserModelId\DSH`（`DisplayName` + `IconUri`），供通知中心显示"程序应用图标"；写失败只影响图标，不影响 Toast，且失败后 1 分钟会再试一次（成功则永久缓存）；
@@ -166,8 +171,8 @@
 
 | 成员 | 说明 |
 | --- | --- |
-| `apiVersion` | 基线协议版本，当前 **`1.0.0`** |
-| `capabilities` | 能力清单，供调用方探测（只增不减）：`push` / `pushAlways` / `notify` / `click.session` / `click.page` / `click.url` / `click.legacy-url` / `web-notification` / `dialog.four-state` |
+| `apiVersion` | 基线协议版本，当前 **`1.1.0`**（旧 `1.0.x` 调用方完全兼容；外部推送默认不点灯，见 README 的「串口 LED 状态灯：给其它插件调用（对外 API）」） |
+| `capabilities` | 能力清单，供调用方探测（只增不减）：`push` / `pushAlways` / `notify` / `click.session` / `click.page` / `click.url` / `click.legacy-url` / `web-notification` / `dialog.four-state` / `led.serial` / `led.scene` / `led.scene.warn` / `led.host-only` 等 |
 | `push(item)` | 走聚焦门控（按会话），返回是否**真的入队** |
 | `pushAlways(item)` | 绕过门控与去重窗口，始终弹 |
 | `notify(item)` | 同 `push`，但返回 `{ ok, queued, silenced, reason, apiVersion, unsupportedVersion }` |
@@ -198,7 +203,7 @@
 
 ## 版本适配
 
-插件声明的兼容范围是 **`>= 0.1.7-rc.2` 且 `<= 0.2.0-rc.2`**（见 `package.json` 的 `peerDependencies`）。升级 DSH 后建议先跑 `node scripts/dsh-runtime-probe.mjs`（把宿主半区挂进 DSH 自带的 cordis 里验证注入/作用域事件/延迟注册/注销清理，不发真实通知），它能第一时间发现契约漂移。
+插件声明的兼容范围是 **`>= 0.2.0-rc.2` 且 `<= 0.2.1-rc.2`**（见 `package.json` 的 `peerDependencies`）。升级 DSH 后建议先跑 `node scripts/dsh-runtime-probe.mjs`（把宿主半区挂进 DSH 自带的 cordis 里验证注入/作用域事件/延迟注册/注销清理，不发真实通知），它能第一时间发现契约漂移。
 
 0.1.3 → 0.1.7 之间与本插件相关的契约变化：
 

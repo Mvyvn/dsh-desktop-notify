@@ -48,6 +48,9 @@ export interface IconPathOptions {
   readonly exists?: (path: string) => boolean
 }
 
+/** 进程内缓存（主题 → 解析结果）：通知热路径上不该每条都做 2 次 existsSync。 */
+const iconCache = new Map<Theme, IconPaths>()
+
 /**
  * 按主题解析图标绝对路径。
  * @param theme 主题（不认识/缺省 → 深色）
@@ -56,6 +59,12 @@ export function iconPathsFor(theme: unknown, options: IconPathOptions = {}): Ico
   const variant = normalizeTheme(theme)
   const dir = options.assetsDir ?? ASSETS_DIR
   const exists = options.exists ?? existsSync
+  // 只有"默认目录 + 真实 existsSync"才能缓存；测试注入的存在性判断必须每次生效。
+  const cacheable = options.assetsDir === undefined && options.exists === undefined
+  if (cacheable) {
+    const hit = iconCache.get(variant)
+    if (hit !== undefined) return hit
+  }
   const themed = THEME_ICON_FILES[variant]
   const pick = (file: string): string => {
     const path = join(dir, file)
@@ -63,11 +72,16 @@ export function iconPathsFor(theme: unknown, options: IconPathOptions = {}): Ico
   }
   const png = pick(themed.png)
   const ico = pick(themed.ico)
-  if (png !== '' && ico !== '') return { theme: variant, png, ico, legacy: false }
-  // 主题图标不全（旧版安装/资源被裁剪）：回退旧白色图标，缺什么补什么
-  const legacyPng = png !== '' ? png : pick(LEGACY_ICON_FILES.png)
-  const legacyIco = ico !== '' ? ico : pick(LEGACY_ICON_FILES.ico)
-  return { theme: variant, png: legacyPng, ico: legacyIco, legacy: true }
+  let result: IconPaths
+  if (png !== '' && ico !== '') result = { theme: variant, png, ico, legacy: false }
+  else {
+    // 主题图标不全（旧版安装/资源被裁剪）：回退旧白色图标，缺什么补什么
+    const legacyPng = png !== '' ? png : pick(LEGACY_ICON_FILES.png)
+    const legacyIco = ico !== '' ? ico : pick(LEGACY_ICON_FILES.ico)
+    result = { theme: variant, png: legacyPng, ico: legacyIco, legacy: true }
+  }
+  if (cacheable) iconCache.set(variant, result)
+  return result
 }
 
 /**

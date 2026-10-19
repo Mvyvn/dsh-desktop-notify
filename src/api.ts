@@ -38,12 +38,13 @@ const PAGE_TARGETS: readonly string[] = ['settings-plugins', 'plugins']
  *   3. 结果对象的字段**只增不改**：现有 push/pushAlways/notify 的返回语义保持不变；
  *   4. `capabilities` 让调用方探测能力，而不是靠版本号猜。新增能力只往数组里加。
  *
- * ⚠️ 本分支（feat/led-serial-ticker）把版本提到 `1.1.0-led.1`：**主版本仍是 1**，
- * 因此老调用方的 `unsupportedVersion` 判定不受影响；`-led.1` 后缀只用来标明
- * "这份构建带着一条不并入主线的串口灯带协议"。串口协议自己另有一个特殊版本号
- * （见 led-api.ts 的 LED_API_VERSION）。
+ * ⚠️ 本版本是 **1.1.0**：主版本仍是 1，声明 `v: '1.0.x'` 的旧调用方完全兼容
+ * （`unsupportedVersion` 仍为 false，返回结构不变）。1.1.0 新增的是**灯**的能力：
+ *   · `desktopNotify.led`（子版本见 led-api.ts）新增 `warn`（黄色警告）状态；
+ *   · **旧 API 调用方不会自动点灯**：外部 push/notify 只负责弹通知，灯只跟随宿主的
+ *     会话/目标/团队/后台任务事件（`led.host-only`）。想主动点灯必须显式调用 `led.scene()`。
  */
-export const NOTIFY_API_VERSION = '1.1.0-led.1'
+export const NOTIFY_API_VERSION = '1.1.0'
 
 /** 本版本提供的能力清单（只增不减）。 */
 export const NOTIFY_API_CAPABILITIES: readonly string[] = [
@@ -58,7 +59,9 @@ export const NOTIFY_API_CAPABILITIES: readonly string[] = [
   'dialog.four-state', // 诊断端点 /dnotify/status
   // ---- 本分支新增：USB 串口 LED 状态灯 ----
   'led.serial',        // 串口通道（`desktopNotify.led`）
-  'led.scene',         // 语义状态：running/waiting/done/error（绿/黄/白/红）
+  'led.scene',         // 语义状态：running/waiting/done/warn/error（白/橙/绿/黄/红）
+  'led.scene.warn',    // 黄色警告（1.1.0 新增；1s 瞬态，优先级 红 > 黄 > 橙）
+  'led.host-only',     // 灯只跟随宿主事件；外部推送默认不点灯
   'led.effect',        // 显式效果（流动/呼吸/闪烁/彩虹…）
   'led.overlay',       // 带 TTL 的瞬态覆盖层（固件自己到期回落）
   'led.brightness',    // 亮度

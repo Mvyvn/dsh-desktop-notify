@@ -9,6 +9,8 @@ lib/index.js          宿主半区（ESM，export name/inject/apply(ctx, config)
 lib/gate.js           按"页面 × 会话"的聚焦门控（纯逻辑，tests/gate.test.mjs 覆盖）
 lib/api.js            对外推送 API（desktopNotify 服务的载荷归一、版本/能力字段与双模式路由，tests/api.test.mjs 覆盖）
 lib/winrt.js          Windows 发送层（koffi 直调 WinRT + AUMID 写入，DisplayName=DeepSeek Harness）
+lib/toast-worker.js   Windows Toast 发送线程（同步 WinRT/COM 在独立 worker，主线程只 postMessage）
+lib/toast-bridge.js   worker 桥：启动 probe、失败/超时/退出回退主线程 inline、单条补发、协议同步
 lib/win32-registry.js Win32 注册表与等待句柄（winrt.js 与 theme-win32.js 共用同一批声明）
 lib/toast-linux.js    Linux 发送层（Notify 编组，app_name=DeepSeek Harness；连接/调用交给 lib/dbus.js）
 assets/dnotify-sw.js  浏览器侧 Service Worker（宿主经 /dnotify/sw.js 提供）：
@@ -30,7 +32,8 @@ assets/               通知图标：dsh-dark.{png,ico} 白鱼 / dsh-light.{png,
                       （均由 scripts/make-icon.py 从 dsh-logo.svg 栅格化）
 locale/               设置页文案（zh / en）
 scripts/              check-syntax.mjs（语法自检）、run-tests.mjs（测试入口）、probe 脚本
-                      winrt-probe.mjs（真发一条 Toast）、theme-probe.mjs（主题检查+切换事件自检）
+                      winrt-probe.mjs（真发一条 Toast）、toast-worker-probe.mjs（inline/worker/回退三路真机验证）
+                      theme-probe.mjs（主题检查+切换事件自检）
                       dsh-runtime-probe.mjs（把宿主半区挂进 DSH 自带的 cordis 跑契约自检）、make-icon.py（图标生成）
 tests/                node --test 单测（含 tests/host.test.mjs 的宿主事件流集成测试）
 cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profile composition（含 config.debug 默认值）
@@ -68,6 +71,7 @@ cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profi
 | `/dnotify/sw.js` | GET | 无（静态资源） | 提供 Service Worker，带 `Service-Worker-Allowed: /` |
 | `/dnotify/click` | GET | 进程令牌 `t=` | 点击落地页：302 到 DSH 深链 |
 | `/dnotify/activate` | GET | 进程令牌 `t=`（必须匹配） | 本机转发器 / Linux 后端的激活端点，返回 `{action}` JSON |
+| `/dnotify/focus` | GET | 进程令牌 `t=`（必须匹配） | Win32 前台激活（页面 ack 后请求；koffi 调 user32，返回 `windowFound/atFront/attempts/reason`） |
 | `/dnotify/status` | GET | 进程令牌 `t=`（必须匹配） | 诊断快照 |
 | `/dnotify/poc-notify` | GET | `admit()` | 开发期触发器（验证 SW 链路） |
 
@@ -86,13 +90,13 @@ cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profi
 
 浏览器半区读客户端 `sessions` 快照里"被主视图保留"的会话（`byId[*].retainedBy.mainView > 0`，与官方 ui-layout/ui-session 同一判据），并订阅 `list.subscribe` 观察切换；取不到就上报 `null`，宿主对"归属不明"的通知照常推送。上报走自带的 `POST /dnotify/page-focus`（同源 fetch，自带 cookie；`pagehide` 那一次带 `keepalive`），URL 用文档相对形式（挂载在子路径下也正确）。
 
-发送层不需要任何宿主服务：`lib/index.js` 按 `process.platform` 动态 import（win32 之外不会加载 koffi）。Windows 侧 `koffi` 是包依赖：`winrt.js` 顶层就 `koffi.load('combase.dll')`，所以 **koffi 解析不到时整个插件都不会加载**（不是"只是发不出通知"）。Linux 侧只用 `node:net` 连 Unix 套接字，零额外依赖。
+发送层不需要任何宿主服务：`lib/index.js` 按 `process.platform` 动态 import（win32 之外不会加载 koffi）。Windows 侧 `koffi` 是包依赖：`winrt.js` 顶层就 `koffi.load('combase.dll')`，因此 koffi 解析不到时**发送后端降级为"无后端"**（插件其余功能照常）；Linux 侧只用 `node:net` 连 Unix 套接字，零额外依赖。
 
 ## 平台分发
 
 | 平台 | 发送层 | 主题后端 | 说明 |
 | --- | --- | --- | --- |
-| `win32` | `lib/winrt.js` | `lib/theme-win32.js` | koffi 直调 WinRT 发 Toast；首次发送补写 AUMID 注册表图标，主题变化时改写；注册表变更事件用 `RegNotifyChangeKeyValue` + 2s 非阻塞句柄检查 |
+| `win32` | `lib/winrt.js`（在 `lib/toast-worker.js` 线程内执行） | `lib/theme-win32.js` | koffi 直调 WinRT 发 Toast（同步 COM 在独立 worker，probe 失败自动回退主线程）；首次发送补写 AUMID 注册表图标，主题变化时改写；注册表变更事件用 `RegNotifyChangeKeyValue` + 2s 非阻塞句柄检查 |
 | `linux` | `lib/toast-linux.js` | `lib/theme-linux.js` | 纯 JS 直连 D-Bus `org.freedesktop.Notifications.Notify`，与主题跟踪共用一条常驻连接；主题读 portal `color-scheme` 并订阅 `SettingChanged` |
 | 其它 | 无 | 无 | 只打印一次"当前平台暂无通知后端"，不抛错、不影响宿主；主题保持默认深色（白鱼图标） |
 
@@ -118,5 +122,6 @@ cordis.patch.yml      bundle patch：把宿主半区作为一行插入 web profi
 - 主题与图标自检：`node scripts/theme-probe.mjs`（打印当前主题/两套图标路径，并用临时注册表键验证切换事件链路，不碰系统主题）；
 - 契约自检（**DSH 升级后先跑这个**）：`node scripts/dsh-runtime-probe.mjs` 把宿主半区挂进 DSH 自带的 cordis（默认 checkout `D:\Program\deepseek-harness`，可用 `DSH_CHECKOUT` 覆盖）里，验证服务注入、作用域事件投递、`ctx.inject` 延迟注册、`ctx.provide` 注销、`ctx.effect` 清理——全程用 `config.sender` 收口，**不发真实通知**；
 - Windows 端到端自检：`node scripts/winrt-probe.mjs`（注册 AUMID + 真发一条 Toast）；
+- Windows Toast worker 真机自检：`node scripts/toast-worker-probe.mjs`（inline → worker → close 回退，真实弹 3 条并输出 PASS/FAIL）；
 - 浏览器半区问题看页面控制台：`/dnotify` 请求的 HTTP 状态与 `[dsh-desktop-notify]` 前缀的告警；
 - 插件未激活：用 `dsh web --dump-config` 确认 composition 里存在 `desktop-notify` 行；确认 `connection`/`timer`/`webServer` 服务在 web profile 中存在。

@@ -43,7 +43,7 @@ export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
 
 /** 判断"人此刻在不在"的输入。 */
 export interface FocusFacts {
-  /** 当前是否有人在看页面（主门控 PageRegistry.focusedLive 的结论）。 */
+  /** 标签页级：任一 DSH 页面可见且持焦点（主门控 focusedLive 的结论）。 */
   readonly focused: boolean
 }
 
@@ -133,7 +133,7 @@ export function createLedJudge(config: JudgeConfig = DEFAULT_JUDGE_CONFIG): LedJ
   let dismissedPhase: WorkPhase | null = null   // 保留：当前已看掉的阶段（用于 resetErrorAck）
   let current: LedScene = OFF_SCENE
 
-  // 聚焦结论由宿主直接给（PageRegistry.focusedLive），判定器不维护任何时间窗。
+  // 聚焦结论由宿主直接给（标签页级）；判定器不维护任何时间窗。
   const focused = (focus: FocusFacts, _now: number): boolean => focus.focused
 
   /** 画面键：阶段 + 会话 + 该阶段起点。用它可以区分"同一阶段的第二次完成"。 */
@@ -240,7 +240,7 @@ export function createLedJudge(config: JudgeConfig = DEFAULT_JUDGE_CONFIG): LedJ
         if (rec.dismissed) return true                                      // **粘滞**：看过就不再亮
         if (!here) return false                                             // 人不在 → 一直保持
         if (!rec.beganFocused) return true                                  // 离开时出现、回来即熄
-        return now - rec.shownAt >= QUIET_MS                                // 在页面里看满 2 秒
+        return now - rec.shownAt >= QUIET_MS                                // 看满 2 秒
       }
       // **空闲会话 ≠ 完成**：快速切换会话时，刚切过去的空闲会话也是 done
       // （没有未结算工作），但它没干过活，不该点亮绿灯/打断运行中的白色流转。

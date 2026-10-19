@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  createSerialLink, pickAutoPort, isValidPortName, RECONNECT_BACKOFF_MS, WRITE_DROPPED,
+  createSerialLink, pickAutoPort, autoPortOrder, isValidPortName, RECONNECT_BACKOFF_MS, WRITE_DROPPED,
 } from '../lib/serial-link.js'
 import { VERIFY_REPLY, encodeLeds, encodeBuzzer } from '../lib/led-protocol.js'
 import { OFF_SCENE } from '../lib/led-scene.js'
@@ -17,11 +17,18 @@ function makeLink(port = 'COM7', options = {}) {
   const state = { now: 1000 }
   const written = []
   const opened = []
-  const failing = { open: '', write: false, busy: false }
+  // writeOnce / shortOnce：模拟**瞬时**故障（一次失败后恢复正常），用来验证"不轻易发黑帧"。
+  // pending：模拟 Windows 传输层"还有一帧没落地"（自适应冗余的第二份要据此跳过）。
+  const failing = { open: '', write: false, busy: false, writeOnce: false, shortOnce: 0, pending: 0 }
   let queue = options.reply === false ? Buffer.alloc(0) : Buffer.from(VERIFY_REPLY, 'ascii')
+  /** 让下一次 read() 收到一条验证回包（握手 / 主动探测用）。 */
+  const replyNow = () => { queue = Buffer.from(VERIFY_REPLY, 'ascii') }
   const handle = {
     write(buf, writeOptions) {
       if (failing.write) throw new Error('写入失败')
+      if (failing.writeOnce) { failing.writeOnce = false; throw new Error('瞬时写入失败') }
+      // 短写：只接受一部分（固件/驱动超时的典型表现），这一帧必须算失败
+      if (failing.shortOnce > 0) { const n = failing.shortOnce; failing.shortOnce = 0; return n }
       // 有界队列模型：传输层积压时，**可丢的动画帧**被拒绝（控制帧必达）
       if (failing.busy && writeOptions && writeOptions.coalesce === true) return WRITE_DROPPED
       written.push(Buffer.from(buf))
@@ -33,6 +40,7 @@ function makeLink(port = 'COM7', options = {}) {
       return out
     },
     close() {},
+    pending() { return failing.pending },
   }
   const link = createSerialLink({
     port,
@@ -48,12 +56,15 @@ function makeLink(port = 'COM7', options = {}) {
     heartbeatMs: 5000,
   })
   return {
-    link, written, opened, failing, handle,
+    link, written, opened, failing, handle, state,
     advance(ms) { state.now += ms },
+    /** 让下一次 read() 收到一条验证回包（握手 / 主动探测用）。 */
+    replyNow,
     /** 连接到握手通过（省得每个用例重复三行）。 */
     async connect() {
       link.tick()
       await flush()
+      replyNow()            // 重连时第一轮已经消费过回包：补一条，否则会卡在 verifying
       link.tick()
       await flush()
       assert.equal(link.status().state, 'ready', `握手应成功：${JSON.stringify(link.status())}`)
@@ -195,16 +206,102 @@ test('close() 之后状态是 disabled，且不再写', async () => {
   assert.equal(h.written.length, 0)
 })
 
-test('pickAutoPort / isValidPortName', () => {
+test('pickAutoPort / autoPortOrder / isValidPortName', () => {
   assert.equal(pickAutoPort([]), '')
   assert.equal(pickAutoPort([{ path: 'COM3', label: '' }, { path: 'COM11', label: 'CH340' }]), 'COM11')
   assert.equal(pickAutoPort([{ path: 'COM3', label: '' }, { path: 'COM9', label: '' }]), 'COM9')
   assert.equal(pickAutoPort([{ path: '/dev/ttyUSB0', label: '' }]), '/dev/ttyUSB0')
+  // USB 转串口优先（CH34x / VCP / USBSER），同组 COM 号从大到小
+  assert.deepEqual(
+    autoPortOrder([
+      { path: 'COM3', label: 'Intel 串行' },
+      { path: 'COM20', label: '\\Device\\VCP0' },
+      { path: 'COM7', label: 'USB-SERIAL CH340' },
+    ]),
+    ['COM20', 'COM7', 'COM3'],
+  )
   assert.equal(isValidPortName('COM7'), true)
   assert.equal(isValidPortName('/dev/ttyUSB0'), true)
   assert.equal(isValidPortName('auto'), false)
   assert.equal(isValidPortName(''), false)
   assert.equal(isValidPortName('COM7; rm -rf'), false)
+})
+
+test('多串口同时在线：先试的口握手失败 → **换下一个候选**（不再死磕 COM19）', async () => {
+  const clock = { now: 10_000 }
+  const opened = []
+  const silent = () => ({ write: (b) => b.length, read: () => Buffer.alloc(0), close: () => {} })
+  const answering = () => {
+    let reply = Buffer.from(VERIFY_REPLY, 'ascii')
+    return {
+      write: (b) => b.length,
+      read: () => { const out = reply; reply = Buffer.alloc(0); return out },
+      close: () => {},
+    }
+  }
+  const link = createSerialLink({
+    port: 'auto',
+    open: async (p) => {
+      opened.push(p)
+      return p === 'COM7' ? answering() : silent()
+    },
+    list: async () => [
+      { path: 'COM19', label: 'USB-SERIAL CH340' },
+      { path: 'COM7', label: 'USB-SERIAL CH340' },
+    ],
+    now: () => clock.now,
+    log: () => {},
+    verifyTimeoutMs: 1500,
+  })
+  link.tick()                       // 打开候选 #1（COM19：按 COM 号大的先）
+  await flush()
+  assert.equal(opened[0], 'COM19')
+  assert.equal(link.status().state, 'verifying')
+
+  clock.now += 900                  // 越过候选窗口（800ms）
+  link.tick()
+  await flush()
+  assert.equal(link.status().errorCode, 'verify-timeout')
+  assert.match(link.status().lastError, /COM19/)
+
+  clock.now += 300                  // 250ms 后换下一个，而不是重试 COM19
+  link.tick()
+  await flush()
+  assert.deepEqual(opened, ['COM19', 'COM7'], '必须换下一个候选')
+
+  link.tick()                       // COM7 回包 → 握手成功
+  await flush()
+  const status = link.status()
+  assert.equal(status.state, 'ready')
+  assert.equal(status.port, 'COM7')
+  assert.equal(status.verified, true)
+})
+
+test('所有串口都没应答：轮完一轮给出可操作提示，并进入 10s 重试', async () => {
+  const clock = { now: 10_000 }
+  const opened = []
+  const silent = () => ({ write: (b) => b.length, read: () => Buffer.alloc(0), close: () => {} })
+  const link = createSerialLink({
+    port: 'auto',
+    open: async (p) => { opened.push(p); return silent() },
+    list: async () => [
+      { path: 'COM19', label: '' },
+      { path: 'COM7', label: '' },
+    ],
+    now: () => clock.now,
+    log: () => {},
+    verifyTimeoutMs: 1500,
+  })
+  link.tick(); await flush()        // COM19
+  clock.now += 900; link.tick(); await flush()
+  clock.now += 300; link.tick(); await flush()   // COM7
+  clock.now += 900; link.tick(); await flush()   // 两个都不应答
+  clock.now += 300; link.tick(); await flush()   // 候选耗尽 → 判定"没有可用设备"
+  assert.deepEqual(opened, ['COM19', 'COM7'], '每个候选只试一次（不重复砸同一个口）')
+  const status = link.status()
+  assert.equal(status.errorCode, 'no-device')
+  assert.match(status.lastError, /没有回应验证帧/)
+  assert.ok(status.retryInMs > 0)
 })
 
 test('OFF_SCENE 常量的形状（链路默认画面）', () => {
@@ -478,3 +575,326 @@ test('外部 API 的颜色帧同样受背压保护（不能被高频调用绕过
   assert.equal(h.link.rawFrame(colorFrame), true, '恢复后颜色帧照常发')
 })
 
+
+// ── 按需帧循环的判据 + 复用缓冲的逐帧正确性 ────────────────────────────────
+
+test('needsFrames()：握手/渐变/连续动画要连续帧，稳态 off/done 不要', async () => {
+  const h = makeLink('COM7')
+  h.link.tick()
+  await flush()
+  assert.equal(h.link.status().state, 'verifying')
+  assert.equal(h.link.needsFrames(), true, '握手窗口需要连续帧（验证帧重发/超时判定靠它）')
+  h.link.tick()
+  await flush()
+  assert.equal(h.link.status().state, 'ready')
+  assert.equal(h.link.needsFrames(), false, 'off 是稳态：心跳 + 探测就够，不需要 240fps')
+
+  const running = { state: 'running', flags: 0, brightness: 200, latched: false, reason: '' }
+  h.link.applyScene(running)
+  h.link.tick()
+  assert.equal(h.link.needsFrames(), true, 'running 的流转是连续动画')
+
+  h.advance(500)
+  const done = { state: 'done', flags: 2 /* MUTED */, brightness: 255, latched: false, reason: '' }
+  h.link.applyScene(done)
+  h.link.tick()
+  assert.equal(h.link.needsFrames(), true, '画面切换的交叉渐变窗口需要连续帧')
+  h.advance(500)
+  h.link.tick()
+  assert.equal(h.link.needsFrames(), false, '渐变结束后的 done 是稳态')
+
+  // 异常即使暂时不闪（没有提醒闩）也按连续帧处理：闪烁是红灯语义的一部分
+  h.link.applyScene({ state: 'error', flags: 0, brightness: 255, latched: false, reason: '' })
+  h.advance(500)
+  h.link.tick()
+  assert.equal(h.link.needsFrames(), true, 'error 需要连续帧')
+})
+
+test('复用像素/帧缓冲：每帧内容仍等于该时刻的纯渲染（不被上一帧污染）', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  // error + ATTENTION：会按绝对时刻闪动，但 error 不做时间抖动 —— 可以逐字节对拍
+  const scene = { state: 'error', flags: 1 /* ATTENTION */, brightness: 255, latched: true, reason: '' }
+  h.link.applyScene(scene)
+  h.advance(500)                       // 跳过 250ms 交叉渐变（t=1500）
+  h.written.length = 0
+  h.link.tick()
+  const frame1 = h.written[h.written.length - 1]
+  assert.equal(frame1.toString('hex'), encodeLeds(renderPixels(scene, 1500)).toString('hex'),
+    '第一帧必须等于 t=1500 的纯渲染结果')
+
+  // 200ms 后：闪动相位变了（800ms 周期），像素必须跟着变，且仍与纯渲染一致
+  h.advance(200)                       // t=1700
+  h.link.tick()
+  const frame2 = h.written[h.written.length - 1]
+  assert.equal(frame2.toString('hex'), encodeLeds(renderPixels(scene, 1700)).toString('hex'),
+    '第二帧必须等于 t=1700 的纯渲染结果（复用缓冲不能被上一帧残留污染）')
+  assert.notEqual(frame1.toString('hex'), frame2.toString('hex'), '闪动相位不同，两帧内容不该相同')
+})
+
+test('复用发送快照：画面来回切换时去重仍然正确（不会"自己等于自己"而停更）', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  const A = { state: 'error', flags: 0, brightness: 255, latched: false, reason: '' }
+  const B = { state: 'done', flags: 2 /* MUTED */, brightness: 255, latched: false, reason: '' }
+  h.link.applyScene(A)
+  h.advance(500)
+  h.link.tick()                                     // 写 A（红）
+  const n1 = h.written.length
+  assert.ok(n1 >= 1)
+  h.advance(500)
+  h.link.tick()
+  assert.equal(h.written.length, n1, '稳态同一画面不重复写（去重生效）')
+  h.link.applyScene(B)
+  h.advance(500)
+  h.link.tick()                                     // 写 B（绿）
+  assert.equal(h.written.length, n1 + 1, '换画面必须写出新帧')
+  const green = h.written[h.written.length - 1]
+  assert.equal(green.toString('hex'), encodeLeds(renderPixels(B, 2500)).toString('hex'))
+  // 再切回 A：发送快照是拷贝而不是复用的像素引用，必须识别出"变了"并重新写
+  h.link.applyScene(A)
+  h.advance(500)
+  h.link.tick()
+  assert.equal(h.written.length, n1 + 2, '切回旧画面也必须重新写（快照不能是复用缓冲的引用）')
+  const red = h.written[h.written.length - 1]
+  assert.equal(red.toString('hex'), encodeLeds(renderPixels(A, 3000)).toString('hex'))
+})
+
+test('稳态动画不再做时间抖动：彗星到两端不会 240Hz ±1 微闪（回归）', async () => {
+  // 现场问题：律动核心到达两头时速度≈0，同一颗灯连续多帧目标值不变；旧实现每帧
+  // 对动画帧做 ±1 LSB 时间抖动，于是它在两个相邻灰度间以 240Hz 来回跳 → 极快微闪。
+  // 现在抖动只保留在 250ms 交叉渐变窗口内（快速变化时不可见），稳态输出纯 8 位。
+  const h = makeLink('COM7')
+  await h.connect()
+  const scene = { state: 'running', flags: 0, brightness: 191, latched: false, reason: '' }
+  const T0 = 1000
+  h.link.applyScene(scene)
+  const body = []
+  for (let i = 1; i <= 400; i += 1) {
+    h.advance(1000 / 240)
+    h.link.tick()
+    const last = h.written[h.written.length - 1]
+    if (!last || last[2] !== 0x01) continue
+    // 跳过淡入（250ms ≈ 60 帧）
+    if (i * (1000 / 240) > 400) body.push(Buffer.from(last.subarray(3, 24)))
+  }
+  assert.ok(body.length > 250, `应采到足够多的稳态帧（${body.length}）`)
+  let flips = 0
+  for (let i = 1; i < body.length - 1; i += 1) {
+    for (let led = 0; led < 7; led += 1) {
+      for (const off of [0, 1, 2]) {
+        const a = body[i - 1][led * 3 + off]
+        const b = body[i][led * 3 + off]
+        const c = body[i + 1][led * 3 + off]
+        if (Math.abs(b - a) === 1 && Math.abs(c - b) === 1 && Math.sign(b - a) !== Math.sign(c - b)) flips += 1
+      }
+    }
+  }
+  assert.ok(flips <= 20, `稳态动画不应再逐帧 ±1 抖动（来回次数 ${flips}）`)
+  // 最后一帧必须**逐字节等于**纯渲染输出（没有抖动、没有额外处理）
+  const lastFrame = h.written[h.written.length - 1]
+  const expected = encodeLeds(renderPixels(scene, 1000 + 400 * (1000 / 240), 400 * (1000 / 240)))
+  assert.equal(lastFrame.toString('hex'), expected.toString('hex'), '稳态帧必须等于渲染器输出（抖动已移除）')
+})
+
+// ── 无固件改动的"状态级韧性"：自适应冗余 / 快速探针 / 坏帧重试 ──────────────
+// 前提（必须说清楚）：固件没有逐帧 ACK/CRC、颜色 payload 长度固定 21B —— 所以
+// **不可能**做线缆级压缩/逐帧校验/逐帧重传。能做的是"状态级韧性"：
+//   · 每帧都是绝对状态 → 丢一帧下一帧自动纠正；
+//   · 劣化时同一帧连发两遍（第二份必达），唯一帧降到 120fps，线上占用不变；
+//   · 劣化期用 0x00 验证帧做快速健康探针（800ms/400ms）；
+//   · 瞬时失败不轻易打黑帧，短写/丢帧不推进"已发送快照"。
+
+const isBlackLeds = (frame) => frame.length === 26 && frame[2] === 0x01
+  && frame.subarray(3, 24).every((byte) => byte === 0)
+const ledsFrames = (list) => list.filter((b) => b.length === 26 && b[2] === 0x01)
+const verifyFrames = (list) => list.filter((b) => b.length === 5 && b[2] === 0x00)
+
+test('自适应韧性：瞬时写失败不打黑帧，但进入冗余；5s 内重复失败（确认断开）才发黑', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  const running = { state: 'running', flags: 0, brightness: 200, latched: false, reason: '' }
+  h.link.applyScene(running)
+  h.advance(500)                     // 跳过交叉渐变
+  h.link.tick()
+  h.written.length = 0
+
+  // ① 第一次失败是"瞬时抖动"（一次抛错，句柄本身还能用）→ 不该把灯打黑
+  h.failing.writeOnce = true
+  h.advance(10)
+  h.link.tick()
+  assert.equal(h.link.status().errorCode, 'write-failed')
+  assert.equal(h.written.some(isBlackLeds), false, '瞬时一次写失败不该发黑帧')
+  assert.equal(h.link.status().quality, 'suspect', '单次写失败 → suspect')
+  assert.equal(h.link.status().redundancy, true, '劣化后进入自适应冗余')
+
+  // ② 5 秒内再次失败：重复失败 = 确认不是抖动 → 这时才允许发黑帧
+  h.advance(RECONNECT_BACKOFF_MS[0])
+  await h.connect()
+  h.link.applyScene(running)
+  h.advance(500)
+  h.link.tick()
+  h.written.length = 0
+  h.failing.writeOnce = true
+  h.advance(10)
+  h.link.tick()
+  assert.equal(h.written.some(isBlackLeds), true, '短时间内重复失败 → 发黑帧（灯锁存的是旧颜色）')
+})
+
+test('自适应冗余：连续丢帧 → 每帧双发（pending=0 才补第二份）、探测提速；健康 10s 后退出', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  const running = { state: 'running', flags: 0, brightness: 160, latched: false, reason: '' }
+  h.link.applyScene(running)
+  h.advance(500)
+  h.link.tick()
+  h.written.length = 0
+
+  // 传输层连续积压：两帧被丢 → 质量掉到 suspect → 进入冗余
+  h.failing.busy = true
+  h.advance(10)
+  h.link.tick()
+  h.advance(10)
+  h.link.tick()
+  assert.equal(ledsFrames(h.written).length, 0, '积压期动画帧被丢弃（不是故障）')
+  assert.equal(h.link.status().quality, 'suspect')
+  assert.equal(h.link.status().redundancy, true, '劣化后进入自适应冗余')
+
+  // 恢复：同一拍写两份（第一份可丢动画帧 + 第二份必达），逐字节相同
+  h.failing.busy = false
+  h.written.length = 0
+  h.advance(10)
+  h.link.tick()
+  const pair = ledsFrames(h.written)
+  assert.equal(pair.length, 2, '冗余期一帧必须写两遍')
+  assert.equal(pair[0].toString('hex'), pair[1].toString('hex'), '两份必须逐字节相同')
+
+  // 传输层还有一帧没落地（pending>0）→ 不补第二份，避免把队列灌满
+  h.written.length = 0
+  h.failing.pending = 1
+  h.advance(10)
+  h.link.tick()
+  assert.equal(ledsFrames(h.written).length, 1, 'pending>0 时不补第二份（背压优先于冗余）')
+  h.failing.pending = 0
+
+  // 快速健康探针：冗余期 800ms 就发一次 0x00（健康期是 2500ms）
+  h.written.length = 0
+  h.advance(900)
+  h.link.reap()
+  assert.equal(verifyFrames(h.written).length, 1, '冗余期应当 800ms 发一次验证探针')
+  // 设备回包 → 探测通过（保持健康；换一个更晚的时刻再确认一次）
+  h.replyNow()
+  h.advance(50)
+  h.link.tick()
+  assert.equal(h.link.status().state, 'ready', '回包恢复后链路仍然 ready')
+
+  // 保持期（10s）内没有新劣化信号 → 到期自动退出冗余，回到单发
+  for (let i = 0; i < 26; i += 1) {   // 每 400ms 一帧（保持 lastWriteAt 新鲜），共 ~10.4s
+    h.advance(400)
+    h.link.tick()
+  }
+  const healthy = h.link.status()
+  assert.equal(healthy.quality, 'ok', `10s 无新信号后质量应恢复：${JSON.stringify({ quality: healthy.quality, errorCode: healthy.errorCode })}`)
+  assert.equal(healthy.redundancy, false, '健康后必须退出冗余')
+  h.written.length = 0
+  h.advance(400)
+  h.link.tick()
+  assert.equal(ledsFrames(h.written).length, 1, '退出冗余后回到单发')
+})
+
+test('坏帧重试：短写算失败、不推进已发送快照 → 重连后当前画面立刻重发', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  // 静态画面（done+MUTED：不呼吸、不抖动）→ 任何时刻渲染结果都相同，便于逐字节对拍
+  const scene = { state: 'done', flags: 2, brightness: 255, latched: false, reason: '' }
+  h.link.applyScene(scene)
+  h.advance(500)
+  h.link.tick()
+  const good = h.written[h.written.length - 1]
+  assert.equal(good[2], 0x01)
+
+  h.written.length = 0
+  h.failing.shortOnce = 10          // 驱动只接受 10/26 字节（超时/接触不良）
+  h.advance(5001)                   // 静态画面不会主动重写，跨过心跳周期逼出一次写
+  h.link.tick()
+  assert.equal(h.link.status().errorCode, 'write-failed', '短写必须判失败（半帧固件会整帧丢掉）')
+  assert.equal(h.written.some(isBlackLeds), false, '瞬时短写不打黑帧')
+
+  // 重连后：当前画面必须重新落地（坏帧绝不能被当成"已经发过"）
+  h.advance(RECONNECT_BACKOFF_MS[0])
+  await h.connect()
+  h.advance(500)
+  h.written.length = 0
+  h.link.tick()
+  const again = ledsFrames(h.written).at(-1)
+  assert.ok(again, '重连后必须重发当前帧')
+  assert.equal(again.toString('hex'), good.toString('hex'), '重发的应当就是当前画面（不是半截坏帧里的旧数据）')
+})
+
+test('质量信号只统计"已连接链路"：自动发现时选错口（非板子）不会白降频', async () => {
+  const clock = { now: 10_000 }
+  const opened = []
+  const silent = () => ({ write: (b) => b.length, read: () => Buffer.alloc(0), close: () => {} })
+  let reply = Buffer.from(VERIFY_REPLY, 'ascii')
+  const answering = () => ({
+    write: (b) => b.length,
+    read: () => { const out = reply; reply = Buffer.alloc(0); return out },
+    close: () => {},
+  })
+  const link = createSerialLink({
+    port: 'auto',
+    open: async (p) => { opened.push(p); return p === 'COM7' ? answering() : silent() },
+    list: async () => [
+      { path: 'COM19', label: 'USB-SERIAL CH340' },   // 先试（COM 号大）但不是板子
+      { path: 'COM7', label: 'USB-SERIAL CH340' },
+    ],
+    now: () => clock.now,
+    log: () => {},
+    verifyTimeoutMs: 1500,
+  })
+  link.tick(); await flush()
+  clock.now += 900; link.tick(); await flush()      // COM19 握手失败 → 换候选
+  clock.now += 300; link.tick(); await flush()      // COM7
+  link.tick(); await flush()                        // 握手成功
+  assert.equal(link.status().state, 'ready')
+  assert.equal(link.status().quality, 'ok', '选错口的握手失败不算链路劣化')
+  assert.equal(link.status().redundancy, false, '不该因为发现过程降频')
+})
+
+test('切标签页（running→running+muted）不能重置彗星相位/重新渐变（严重闪烁回归）', async () => {
+  // 用户实测：切换浏览器标签页/其它应用时灯严重闪烁。
+  // 根因：焦点翻转会让 judge 给 running 画面打/去 MUTED；旧 applyScene 用完整 flags 判"画面变了"
+  // → 重置 sceneSince（彗星相位回起点、stagger 重新展开）并叠 250ms 渐变。
+  // MUTED 在 running 渲染里根本不参与，所以这类变化必须完全忽略。
+  const h = makeLink('COM7')
+  await h.connect()
+  const base = { state: 'running', flags: 0, brightness: 191, latched: false, reason: '' }
+  h.link.applyScene(base)                 // sceneSince = 1000
+  for (let i = 0; i < 150; i += 1) {      // 走到相位中段（~625ms）
+    h.advance(1000 / 240)
+    h.link.tick()
+  }
+  h.link.applyScene({ ...base, flags: 2 }) // 焦点翻转：仅 MUTED，像素语义不变
+  h.advance(1000 / 240)
+  h.link.tick()
+  const t = 1000 + 151 * (1000 / 240)
+  const last = h.written[h.written.length - 1]
+  const expected = encodeLeds(renderPixels({ ...base, flags: 2 }, t, t - 1000))
+  assert.equal(last.toString('hex'), expected.toString('hex'),
+    '焦点翻转只改 MUTED：相位与渐变都不能重置（帧必须等于原相位渲染）')
+})
+
+test('等待画面（waiting→waiting+muted）是真实视觉变化：仍然走渐变', async () => {
+  const h = makeLink('COM7')
+  await h.connect()
+  const waiting = { state: 'waiting', flags: 0, brightness: 191, latched: false, reason: '' }
+  h.link.applyScene(waiting)
+  h.advance(500)
+  h.link.tick()
+  h.link.applyScene({ ...waiting, flags: 2 })   // 停止呼吸 = 视觉变化
+  h.advance(1000 / 240)
+  h.link.tick()
+  const last = h.written[h.written.length - 1]
+  const pure = encodeLeds(renderPixels({ ...waiting, flags: 2 }, 1000 + 500 + 1000 / 240, 500 + 1000 / 240))
+  assert.notEqual(last.toString('hex'), pure.toString('hex'), 'waiting 的 MUTED 会改画面，必须允许渐变')
+})

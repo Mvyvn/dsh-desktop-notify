@@ -46,8 +46,19 @@ const MAX_INFLIGHT_WRITES = 1
 
 const workerUrl = new URL('./serial-worker.js', import.meta.url)
 
-interface Pending {
-  at: number
+/** 空读取的共享返回值：`read()` 每 4ms 被调一次，没数据时不该每次分配一个空 Buffer。 */
+const EMPTY_RX = Buffer.alloc(0)
+
+/**
+ * 把 worker 发来的结构化克隆包成 Buffer。
+ *
+ * 结构化克隆给到的是**这次消息新分配**的 ArrayBuffer/Uint8Array，所以这里做视图即可，
+ * 不要再 `Buffer.from(msg.data)` 复制一遍（那是接收路径上每块的额外一次拷贝）。
+ */
+function chunkView(data: unknown): Buffer | null {
+  if (data instanceof ArrayBuffer) return Buffer.from(data)
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  return null
 }
 
 /**
@@ -70,11 +81,23 @@ export async function openWin32Serial(
   worker.unref()
   let closed = false
   let dead = false
+  /** onFault 只报一次：一个 worker 的致命故障重复上报会让链路把重连次数/退避算错。 */
+  let faultReported = false
   let fault: ((message: string) => void) | undefined
+
+  const reportFault = (message: string): void => {
+    if (closed || faultReported) return
+    // 还没挂 onFault（open 尚未返回）：不吞这次故障，留给下一条；
+    // 这个窗口极小（微任务级），且启动期失败本来就走 open() 的异常路径。
+    if (fault === undefined) return
+    faultReported = true
+    fault(message)
+  }
 
   const rx: Buffer[] = []
   let rxBytes = 0
-  const pending = new Map<number, Pending>()
+  /** 尚未被 worker 回报 written 的帧：seq → 入队时刻（不用每帧再分配一个对象）。 */
+  const pending = new Map<number, number>()
   let seq = 0
 
   const pushRx = (chunk: Buffer): void => {
@@ -100,11 +123,15 @@ export async function openWin32Serial(
 
   worker.on('message', (msg: any) => {
     if (msg && typeof msg.t === 'string') {
-      if (msg.t === 'data') { pushRx(Buffer.from(msg.data)); return }
+      if (msg.t === 'data') {
+        const chunk = chunkView(msg.data)
+        if (chunk !== null) pushRx(chunk)
+        return
+      }
       if (msg.t === 'written') { pending.delete(Number(msg.seq)); return }
       if (msg.t === 'writeError') {
         pending.delete(Number(msg.seq))
-        fault?.(String(msg.message ?? '写入失败'))
+        reportFault(String(msg.message ?? '写入失败'))
         return
       }
     }
@@ -116,13 +143,13 @@ export async function openWin32Serial(
     // 启动阶段（还没等到 ready）必须把等待者叫醒，否则 open() 会永远挂着
     const waiter = waiters.shift()
     if (waiter) waiter({ t: 'workerError', message: err.message })
-    fault?.(`串口线程异常：${err.message}`)
+    reportFault(`串口线程异常：${err.message}`)
   })
   worker.on('exit', (code) => {
     dead = true
     const waiter = waiters.shift()
     if (waiter) waiter({ t: 'workerError', message: `串口线程退出（code=${code}）` })
-    if (!closed) fault?.(`串口线程退出（code=${code}）`)
+    reportFault(`串口线程退出（code=${code}）`)
   })
 
   /** 看门狗：worker 卡在原生调用里时，主线程照样活着 —— 杀掉它并报故障。 */
@@ -130,13 +157,13 @@ export async function openWin32Serial(
     if (dead || closed) return
     const now = Date.now()
     let hung = false
-    for (const [s, info] of pending) {
-      if (now - info.at > WRITE_WATCHDOG_MS) { pending.delete(s); hung = true }
+    for (const [s, at] of pending) {
+      if (now - at > WRITE_WATCHDOG_MS) { pending.delete(s); hung = true }
     }
     if (!hung) return
     dead = true
     void worker.terminate()
-    fault?.('串口写入超时（设备可能已拔出）')
+    reportFault('串口写入超时（设备可能已拔出）')
   }, 250)
   if (typeof (watchdog as any).unref === 'function') (watchdog as any).unref()
 
@@ -182,7 +209,7 @@ export async function openWin32Serial(
       // 有界队列：动画帧可丢（下一次用最新画面重发），控制帧必达。
       if (options?.coalesce === true && pending.size >= MAX_INFLIGHT_WRITES) return WRITE_DROPPED
       const id = (seq += 1)
-      pending.set(id, { at: Date.now() })
+      pending.set(id, Date.now())
       // ⚠️ 不能用 Buffer.from(bytes) 再转移它的 backing ArrayBuffer：
       // 小 Buffer 来自 Node 的 8KB **共享池**，转移等于把整个池从主线程 detach 掉
       // （之后主线程所有小 Buffer 分配都会坏掉），而且 worker 拿到的是"池起点"而不是帧起点。
@@ -199,7 +226,7 @@ export async function openWin32Serial(
     },
     /** 只从队列取字节 —— 主线程不碰任何原生 API。 */
     read(max = 256): Buffer {
-      if (rx.length === 0) return Buffer.alloc(0)
+      if (rx.length === 0 || max <= 0) return EMPTY_RX
       const out: Buffer[] = []
       let got = 0
       while (rx.length > 0 && got < max) {
@@ -239,6 +266,7 @@ export async function openWin32Serial(
       if (closed) return
       closed = true
       clearInterval(watchdog)
+      pending.clear()
       try { worker.postMessage({ t: 'close' }) } catch (e) { /* ignore */ }
       // 收尾宽限：没有在飞帧就 150ms；有的话按"一帧最多 200ms 写超时"放宽，
       // 免得 terminate 把还在发的最后一帧（熄灯帧）截断。

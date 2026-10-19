@@ -79,7 +79,41 @@ test('目标 blocked → error（任务阻塞属于异常，不是"等你回话"
   assert.match(v.reasons.join(' '), /目标阻塞/)
 })
 
-test('有人等你回答 → waiting，且优先级高于一切运行中工作', () => {
+test('目标 blocked 压过运行中：红灯必须立刻出现，不等任务跑完', () => {
+  const ledger = createWorkLedger()
+  ledger.observe('s1', facts({ goalPhase: 'blocked', agentRunning: true, liveSubagents: 2, openJobs: 1 }), T0)
+  const v = ledger.evaluateAll(T0)[0]
+  assert.equal(v.phase, 'error', 'running 不能盖住 blocked 红')
+  assert.match(v.reasons.join(' '), /目标阻塞/)
+})
+
+test('blocked 被看到后回到真实工作状态，而不是一直 error', () => {
+  const ledger = createWorkLedger()
+  ledger.observe('s1', facts({ goalPhase: 'blocked', agentRunning: true }), T0)
+  assert.equal(ledger.evaluate('s1', T0 + 1).phase, 'error')
+  ledger.acknowledgeBlocked()
+  assert.equal(ledger.evaluate('s1', T0 + 2).phase, 'running', '看过后红灯退出，回到运行白')
+
+  // 工作结束 → done（goalPhase 仍是 blocked，但已确认过）
+  ledger.observe('s1', facts({ goalPhase: 'blocked' }), T0 + 100)
+  const done = ledger.evaluate('s1', T0 + 101)
+  assert.equal(done.phase, 'done', '会话结束后应能显示完成绿')
+  assert.equal(done.completed, true)
+
+  // 再次进入 blocked 的新一次阻塞 → 重新亮红
+  ledger.observe('s1', facts({ goalPhase: 'complete' }), T0 + 200)
+  ledger.observe('s1', facts({ goalPhase: 'blocked' }), T0 + 300)
+  assert.equal(ledger.evaluate('s1', T0 + 301).phase, 'error', '新阻塞要重新亮红')
+})
+
+test('异常压过失焦等待（统一优先级：红 > 橙）', () => {
+  const ledger = createWorkLedger()
+  ledger.observe('s1', facts({ waitingUser: 1 }), T0)
+  ledger.noteError('s1', '目标阻塞', T0)
+  assert.equal(ledger.evaluate('s1', T0 + 1).phase, 'error')
+})
+
+test('等待优先于普通运行中工作（但异常/阻塞会压过它）', () => {
   const ledger = createWorkLedger()
   ledger.observe('s1', facts({ waitingUser: 1, agentRunning: true, liveSubagents: 3, openJobs: 2 }), T0)
   const v = ledger.evaluate('s1', T0 + 1)
@@ -94,13 +128,6 @@ test('异常在保鲜期内 → error；过期后回到普通判定', () => {
   ledger.noteError('s1', '后台任务失败（job-1）', T0)
   assert.equal(ledger.evaluate('s1', T0 + 999).phase, 'error')
   assert.equal(ledger.evaluate('s1', T0 + 1001).phase, 'done')
-})
-
-test('等待优先于异常（等着你回答比"刚才失败过"更该显示）', () => {
-  const ledger = createWorkLedger()
-  ledger.observe('s1', facts({ waitingUser: 1 }), T0)
-  ledger.noteError('s1', '任意异常', T0)
-  assert.equal(ledger.evaluate('s1', T0 + 1).phase, 'waiting')
 })
 
 test('clearError 之后不再滞留 error', () => {

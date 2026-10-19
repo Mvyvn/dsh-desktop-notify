@@ -24,13 +24,12 @@
 // 而不是整个功能失效（DSH 里 ctx.get('jobs') === undefined 是"没这个能力"，
 // 不等于"没有后台任务"——这点必须显式区分，否则会把"没装服务"误判成"已完成"）。
 //
-// ── 判定优先级（顺序本身就是语义）──────────────────────────────────────────
-//   1. 有人在等你（提问/审批）         → waiting
-//   2. 刚发生过异常（任务失败/审批被拒）→ error（有保鲜期，过期回到普通判定）
-//   3. 还有未结算的工作                 → running（这才是"AI 仍在运行"）
-//   4. 目标被阻塞                       → waiting（需要人来解，AI 不会自己继续）
-//   5. 目标 active 但没有 agent 在跑    → running（round-driver 会再次调起它）
-//   6. 其余                             → done
+// ── 判定优先级（顺序本身就是语义；与灯的"红 > 黄 > 橙 > 绿 > 白"一致）──
+//   1. 刚发生过异常 / 目标被阻塞        → error（红色，要处理；**压过运行中**）
+//   2. 有人在等你（提问/审批）          → waiting（橙色）
+//   3. 还有未结算的工作                 → running（白：AI 仍在运行）
+//   4. 目标 active 但没有 agent 在跑    → running（round-driver 会再次调起它）
+//   5. 其余                             → done（绿）
 //
 // 纯函数 + 显式账本，是为了能在单测里穷举这些组合（tests/lifecycle.test.mjs）。
 
@@ -82,7 +81,7 @@ export function emptyFacts(): WorkFacts {
     pendingInbox: 0,
     openTurn: false,
     waitingUser: 0,
-  everRan: false,
+    everRan: false,
     goalPhase: null,
     unfinishedTodos: 0,
   }
@@ -114,6 +113,12 @@ export interface WorkEntry {
   facts: WorkFacts
   /** 最近一次异常（任务失败/审批被拒/目标阻塞），带保鲜期。 */
   lastError: { at: number; reason: string } | null
+  /**
+   * 目标阻塞已被"看到"：不再把 blocked 当成 error（否则聚焦 2s 熄灭后，
+   * 阻塞事实仍在，判定永远 error → 灯一直灭，运行白/完成绿都被吞掉）。
+   * 目标离开 blocked、或新的阻塞事件到达时清掉。
+   */
+  blockedAcked: boolean
   /** 最近一次被更新（用于清理久未出现的会话）。 */
   updatedAt: number
   /** 是否**干过活**（跑过/等过/出过错）。没干过活的空闲会话不算"完成"。 */
@@ -142,6 +147,12 @@ export interface WorkLedger {
   clearError(sessionId: string): void
   /** 把所有会话的异常记录都清掉（异常画面已被"看到"并熄灯之后调用）。 */
   clearAllErrors(): void
+  /**
+   * 所有"目标阻塞"异常都视为已看到：blocked 不再压住 running/done，
+   * 红灯熄灭后灯回到真实工作状态（白/绿），直到下一次阻塞或离开 blocked。
+   * @param sessionId 只确认这个会话；省略 = 全部
+   */
+  acknowledgeBlocked(sessionId?: string): void
   /** 判定单个会话。 */
   evaluate(sessionId: string, now: number): WorkVerdict
   /** 判定所有已知会话，按"最需要你看"排序返回（error → waiting → running → done）。 */
@@ -184,7 +195,7 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     const key = String(sessionId)
     let entry = entries.get(key)
     if (entry === undefined) {
-      entry = { sessionId: key, facts: emptyFacts(), lastError: null, updatedAt: at, sawWork: false }
+      entry = { sessionId: key, facts: emptyFacts(), lastError: null, blockedAcked: false, updatedAt: at, sawWork: false }
       entries.set(key, entry)
     }
     entry.updatedAt = at
@@ -211,12 +222,20 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     if (f.everRan || pending > 0 || waiting > 0 || freshError) entry.sawWork = true
 
     let phase: WorkPhase
-    if (waiting > 0) {
-      phase = 'waiting'
-      reasons.push(`等待你的输入/审批 ${waiting} 项`)
-    } else if (freshError && entry.lastError !== null) {
+    // 统一优先级：**报错（含目标阻塞） > 等待你 > 运行中 > 完成**。
+    // 旧实现先看 waiting、且把"目标阻塞"放在 pending 之后 → 跑着的时候阻塞的红灯要等
+    // 运行结束才出现。灯的用户语义是"最需要处理的事先亮"，所以错误必须压过 running。
+    if (freshError && entry.lastError !== null) {
       phase = 'error'
       reasons.push(`异常：${entry.lastError.reason}`)
+    } else if (f.goalPhase === 'blocked' && !entry.blockedAcked) {
+      // 目标 blocked = **任务阻塞**，属于"异常"（红），不是"等你"（黄）：
+      // 它需要的是"去处理"，而不是"回答模型"。
+      phase = 'error'
+      reasons.push('目标阻塞（任务被卡住，需要处理）')
+    } else if (waiting > 0) {
+      phase = 'waiting'
+      reasons.push(`等待你的输入/审批 ${waiting} 项`)
     } else if (pending > 0) {
       phase = 'running'
       // 逐条列明"为什么还在跑"——这是本检查器存在的全部意义
@@ -225,11 +244,6 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
       if (f.openJobs > 0) reasons.push(`${f.openJobs} 个后台任务未结算`)
       if (f.pendingInbox > 0) reasons.push(`inbox 里还有 ${f.pendingInbox} 条待处理输入（会被再次调起）`)
       if (f.openTurn) reasons.push('回合边界仍开着')
-    } else if (f.goalPhase === 'blocked') {
-      // 目标 blocked = **任务阻塞**，属于"异常"（红），不是"等你"（黄）：
-      // 它需要的是"去处理"，而不是"回答模型"。
-      phase = 'error'
-      reasons.push('目标阻塞（任务被卡住，需要处理）')
     } else if (f.goalPhase === 'active') {
       // 双保险：正常路径下 active 目标会被 round-driver 再次调起，
       // 即使此刻没有任何 agent 在跑，也**不能**判成完成。
@@ -256,6 +270,7 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     observe(sessionId, facts, at) {
       const entry = touch(sessionId, at)
       // 只认识已知字段：宿主传进来的对象可能来自 any 边界，逐字段取默认值。
+      const goalPhase = normalizeGoalPhase(facts.goalPhase)
       entry.facts = {
         agentRunning: facts.agentRunning === true,
         liveSubagents: nonNegative(facts.liveSubagents),
@@ -263,10 +278,12 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
         pendingInbox: nonNegative(facts.pendingInbox),
         openTurn: facts.openTurn === true,
         waitingUser: nonNegative(facts.waitingUser),
-    everRan: facts.everRan === true,
-        goalPhase: normalizeGoalPhase(facts.goalPhase),
+        everRan: facts.everRan === true,
+        goalPhase,
         unfinishedTodos: nonNegative(facts.unfinishedTodos),
       }
+      // 离开 blocked 后，"已看过阻塞"就失效；下次再阻塞要重新亮红。
+      if (goalPhase !== 'blocked') entry.blockedAcked = false
       // 立刻按新事实刷一次阶段缓存：`since` 要等于"这个阶段**从哪一刻开始**"，
       // 而不是"第一次有人来问是哪一刻"——否则「亮了多久」会随查询时机漂移。
       evaluateEntry(entry, at)
@@ -274,6 +291,7 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     noteError(sessionId, reason, at) {
       const entry = touch(sessionId, at)
       entry.lastError = { at, reason: String(reason) }
+      entry.blockedAcked = false   // 新的异常事件：红灯要重新亮
     },
     clearError(sessionId) {
       const entry = entries.get(String(sessionId))
@@ -282,6 +300,17 @@ export function createWorkLedger(options: LedgerOptions = {}): WorkLedger {
     /** 把所有会话的错误记录都清掉（错误画面已经被"看到"并熄灯之后调用）。 */
     clearAllErrors() {
       for (const [, entry] of entries.entries()) entry.lastError = null
+    },
+    /** 目标阻塞已被看到：blocked 不再冒充 error，让灯回到 running/done。 */
+    acknowledgeBlocked(sessionId?: string) {
+      if (sessionId !== undefined) {
+        const entry = entries.get(String(sessionId))
+        if (entry && entry.facts.goalPhase === 'blocked') entry.blockedAcked = true
+        return
+      }
+      for (const [, entry] of entries.entries()) {
+        if (entry.facts.goalPhase === 'blocked') entry.blockedAcked = true
+      }
     },
     evaluate(sessionId, now) {
       const entry = entries.get(String(sessionId))

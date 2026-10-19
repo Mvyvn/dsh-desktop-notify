@@ -161,21 +161,44 @@ function bindClickHandler() {
   })
 }
 
+/**
+ * 编组 `xdg-desktop-portal` OpenURI 的消息体（签名 `ssa{sv}`）。
+ *
+ * ⚠️ D-Bus 的对齐是**相对消息体起点**的：`a{sv}` 的 UINT32 长度字段必须 4 对齐、
+ * dict entry 必须 8 对齐。`Writer` 只会按自身偏移补零，所以必须在一个 writer 里
+ * 先对齐再写；旧实现把预拼好的 options 直接 `raw()` 追加到 body 后面，entry 落在
+ * 非 8 对齐偏移上 —— 严格实现（libdbus/GLib）会按 bad alignment 拒收，Linux 上
+ * 点击通知的跳转因此必然失败。
+ *
+ * 纯函数（可离线单测）：返回完整 body 与 entry 的起点偏移，测试用它验证对齐。
+ */
+export function openUriBody(url, token = 'dsh_notify_' + Date.now().toString(36)) {
+  const entry = new Writer()
+  entry.str('handle_token').sig('v').sig('s').str(String(token))
+  const body = new Writer()
+  body.str('')                       // parent_window：无父窗口
+  body.str(String(url))              // uri
+  body.align(4)                      // a{sv} 的字节长度（UINT32）
+  const lenPos = body.length
+  body.u32(0)                        // 长度占位
+  body.align(8)                      // dict entry 必须 8 对齐
+  const entryStart = body.length
+  body.raw(entry.buffer())
+  const out = body.buffer()
+  out.writeUInt32LE(body.length - entryStart, lenPos)
+  return { body: out, lenPos, entryStart, entryLength: body.length - entryStart }
+}
+
 /** 用 portal 打开链接（OpenURI：parent_window 传空串表示无父窗口）。 */
 async function openViaPortal(url) {
-  const options = new Writer()
-  options.align(4)
-  const entry = new Writer()
-  entry.align(8).str('handle_token').sig('v').sig('s').str('dsh_notify_' + Date.now().toString(36))
-  options.u32(entry.length)
-  options.raw(entry.buffer())
+  const { body } = openUriBody(url)
   await call({
     destination: PORTAL_DESTINATION,
     path: PORTAL_PATH,
     interface: PORTAL_OPEN_URI,
     member: 'OpenURI',
     signature: 'ssa{sv}',
-    body: new Writer().str('').str(url).raw(options.buffer()).buffer(),
+    body,
     timeoutMs: 5000,
   })
 }
